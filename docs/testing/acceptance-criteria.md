@@ -1,0 +1,15 @@
+# Business OS — Master Prompt 05 Acceptance Criteria (Scenarios A–K)
+
+All 11 Mandatory Acceptance Scenarios are verified end-to-end against PostgreSQL in `scripts/test-business-os.mjs`:
+
+- **Scenario A — Owner Withdrawal**: 5,000,000 IRR withdrawal reduces business cash by 5,000,000, increases `OWNER_DRAWINGS (3201)` by 5,000,000, leaves Business P&L Net Profit completely unchanged; linked 3,000,000 household + 2,000,000 loan personal expenses recorded cleanly in Personal Finance Ledger.
+- **Scenario B — Mixed Sales Payment**: 6,000,000 IRR invoice with discount & tax paid 1,000,000 CASH + 3,000,000 POS + 2,000,000 unpaid credit; verifies `payment_status = PARTIALLY_PAID`, `remaining_amount = 2000000.00`, treasury increments, stock ledger issue, balanced double-entry journal, and loyalty points earned.
+- **Scenario C — Subsequent Customer Payment**: Later 1,000,000 IRR payment reduces invoice remaining to 1,000,000, increases treasury balance, posts balanced `DR Bank / CR AR` journal, and idempotent retry produces zero duplicates.
+- **Scenario D — Product Variants**: Creates 2 sizes × 3 colors (6 independent variants), posts independent opening stocks, sells 1 variant, verifies ONLY the sold variant's stock decreases while parent projection updates accurately.
+- **Scenario E — Minimum Stock & Smart Purchase**: Sets `min_stock = 10`, available `8`, incoming PO `5`, verifies explainable recommendation factoring in incoming PO, accepts & converts to official PO, and retries conversion verifying zero duplicate PO creation.
+- **Scenario F — Recurring Expenses**: Creates monthly rent obligation (`DUE`, zero auto-posted expense), records payment with `Idempotency-Key`, verifies linked accounting entry & `PAID` status, and verifies retry generates zero duplicate expense.
+- **Scenario G — Cheque Lifecycle**: Receives cheque -> Deposits -> Moves to In Collection -> Clears; verifies valid state transitions, blocks invalid transition (`409 INVALID_CHEQUE_TRANSITION`), verifies accounting journals, dashboard summary cards, and daily monthly bar chart series.
+- **Scenario H — Accounting Reports & XLSX Export**: Generates Journal Book, General Ledger, Subsidiary Ledger, Detail Ledger, Trial Balance, Balance Sheet, Profit & Loss, and downloads real `.xlsx` workbook via `/api/v1/accounting/journal-book/export`, parsing the binary `.xlsx` file to confirm exported debit/credit totals match on-screen Trial Balance 100%!
+- **Scenario I — RBAC**: Creates a `SALESPERSON` employee via `/api/v1/employees`, logs in as that employee, verifies sales creation works while `/api/v1/accounting/profit-loss` and `/api/v1/personal-finance/dashboard` return `403 PERMISSION_DENIED` and appear in security `audit_logs`.
+- **Scenario J — Offline Synchronization**: Offline sales invoice create + confirm via `/api/v1/sync/push` + opaque cursor pull + idempotent retry returning `DUPLICATE` with zero duplicate invoice/journal/stock rows.
+- **Scenario K — Tenant Isolation**: Cross-tenant attempts on contacts, invoices, accounts, and personal finance between Org A and Org B strictly rejected with `403 TENANT_ACCESS_DENIED`.

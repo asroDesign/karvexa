@@ -1,0 +1,2170 @@
+"use client";
+
+import React, { useCallback, useEffect, useState } from "react";
+import {
+  ArrowLeftRight,
+  BookOpen,
+  Boxes,
+  CheckCircle2,
+  ClipboardCheck,
+  CreditCard,
+  Download,
+  FileSpreadsheet,
+  Landmark,
+  LayoutDashboard,
+  Package,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  ShoppingBag,
+  Smartphone,
+  Users,
+  AlertTriangle,
+  Lock,
+  ScanBarcode,
+} from "lucide-react";
+import {
+  apiFetch,
+  formatDateFa,
+  formatDateTimeFa,
+  formatIrr,
+  formatQty,
+  SessionMeResponse,
+} from "@/lib/format";
+import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
+import { GlassDashboard } from "./GlassDashboard";
+import { UserAccessSettings } from "./UserAccessSettings";
+import { FiscalLifecyclePanel } from "./FiscalLifecyclePanel";
+import { Award, BarChart3, CalendarRange, Settings, Sparkles, Wallet, Zap } from "lucide-react";
+
+type OrgTab =
+  | "dashboard"
+  | "mixed_sales"
+  | "quick_entry"
+  | "personal_finance"
+  | "fiscal_lifecycle"
+  | "accounting"
+  | "inventory"
+  | "variants_replenish"
+  | "catalog"
+  | "contacts"
+  | "crm_employees"
+  | "commerce"
+  | "treasury"
+  | "cheque_analytics"
+  | "settings_access"
+  | "subscription"
+  | "sync";
+
+interface OrgWorkspaceProps {
+  session: SessionMeResponse;
+  onRefreshSession: () => Promise<void>;
+  onToast: (msg: string, type?: "success" | "error") => void;
+}
+
+const ADVANCED_TABS: Set<OrgTab> = new Set([
+  "personal_finance",
+  "quick_entry",
+  "mixed_sales",
+  "variants_replenish",
+  "crm_employees",
+  "cheque_analytics",
+]);
+
+const ORG_TABS: Array<{ id: OrgTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: "dashboard", label: "داشبورد و نمودارهای روزانه", icon: LayoutDashboard },
+  { id: "mixed_sales", label: "فروش سریع، پرداخت ترکیبی و PDF", icon: ShoppingBag },
+  { id: "quick_entry", label: "ثبت سریع هزینه و درآمد", icon: Zap },
+  { id: "personal_finance", label: "مالی شخصی و برداشت مالک", icon: Wallet },
+  { id: "fiscal_lifecycle", label: "کدینگ، افتتاحیه و سال مالی", icon: CalendarRange },
+  { id: "accounting", label: "دفتر روزنامه، تراز و اکسل", icon: BookOpen },
+  { id: "inventory", label: "انبار، انتقال و انبارگردانی", icon: Boxes },
+  { id: "variants_replenish", label: "تنوع کالا و خرید هوشمند", icon: Sparkles },
+  { id: "catalog", label: "کاتالوگ کالا و بارکد", icon: Package },
+  { id: "contacts", label: "اشخاص و طرف‌حساب‌ها", icon: Users },
+  { id: "crm_employees", label: "باشگاه مشتریان و پرسنل", icon: Award },
+  { id: "commerce", label: "فاکتورهای فروش و خرید", icon: ShoppingBag },
+  { id: "treasury", label: "خزانه، چک و امانی", icon: Landmark },
+  { id: "cheque_analytics", label: "داشبورد و نمودار چک‌ها", icon: BarChart3 },
+  { id: "settings_access", label: "تنظیمات، تم و دسترسی کاربران", icon: Settings },
+  { id: "subscription", label: "اشتراک کافه‌بازار و خروجی", icon: CreditCard },
+  { id: "sync", label: "همگام‌سازی آفلاین اندروید", icon: Smartphone },
+];
+
+export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspaceProps) {
+  const orgId = session.active_organization?.organization_id ?? null;
+  const [tab, setTab] = useState<OrgTab>("dashboard");
+  const [loading, setLoading] = useState(false);
+
+  // Dashboard
+  const [dash, setDash] = useState<Record<string, unknown> | null>(null);
+
+  // Accounting
+  const [accountsList, setAccountsList] = useState<Array<Record<string, unknown>>>([]);
+  const [periods, setPeriods] = useState<Array<Record<string, unknown>>>([]);
+  const [journals, setJournals] = useState<Array<Record<string, unknown>>>([]);
+  const [trialBalance, setTrialBalance] = useState<Record<string, unknown> | null>(null);
+  const [profitLoss, setProfitLoss] = useState<Record<string, unknown> | null>(null);
+  const [showJournalForm, setShowJournalForm] = useState(false);
+  const [jForm, setJForm] = useState({
+    document_date: new Date().toISOString().slice(0, 10),
+    description: "",
+    confirm_immediately: true,
+    accounting_period_id: "",
+    lines: [
+      { account_id: "", debit: "10000000.00", credit: "0.00", description: "" },
+      { account_id: "", debit: "0.00", credit: "10000000.00", description: "" },
+    ],
+  });
+
+  // Inventory
+  const [warehousesList, setWarehousesList] = useState<Array<Record<string, unknown>>>([]);
+  const [stockData, setStockData] = useState<Record<string, unknown> | null>(null);
+  const [movements, setMovements] = useState<Array<Record<string, unknown>>>([]);
+  const [transfers, setTransfers] = useState<Array<Record<string, unknown>>>([]);
+  const [counts, setCounts] = useState<Array<Record<string, unknown>>>([]);
+  const [productsList, setProductsList] = useState<Array<Record<string, unknown>>>([]);
+  const [transferForm, setTransferForm] = useState({
+    source_warehouse_id: "",
+    destination_warehouse_id: "",
+    product_id: "",
+    quantity: "2.0000",
+    notes: "انتقال اتمیک بین انبار",
+  });
+  const [countForm, setCountForm] = useState({
+    warehouse_id: "",
+    product_id: "",
+    counted_qty: "24.0000",
+    notes: "انبارگردانی دوره‌ای",
+  });
+
+  // Catalog
+  const [catalogMeta, setCatalogMeta] = useState<{
+    categories: Array<Record<string, unknown>>;
+    brands: Array<Record<string, unknown>>;
+    units: Array<Record<string, unknown>>;
+  }>({ categories: [], brands: [], units: [] });
+  const [barcodeInput, setBarcodeInput] = useState("6261002003501");
+  const [barcodeResult, setBarcodeResult] = useState<Record<string, unknown> | null>(null);
+  const [prodForm, setProdForm] = useState({
+    code: "",
+    name: "",
+    base_unit_id: "",
+    purchase_price: "15000000.00",
+    sale_price: "21000000.00",
+    barcode: "",
+  });
+
+  // Contacts
+  const [contactsList, setContactsList] = useState<Array<Record<string, unknown>>>([]);
+  const [contactForm, setContactForm] = useState({
+    code: "",
+    display_name: "",
+    type: "CUSTOMER",
+    mobile: "",
+    credit_limit: "100000000.00",
+  });
+
+  // Commerce (Sales & Purchasing)
+  const [salesList, setSalesList] = useState<Array<Record<string, unknown>>>([]);
+  const [purchasesList, setPurchasesList] = useState<Array<Record<string, unknown>>>([]);
+  const [saleForm, setSaleForm] = useState({
+    customer_id: "",
+    warehouse_id: "",
+    product_id: "",
+    quantity: "1.0000",
+    unit_price: "54000000.00",
+  });
+
+  // Treasury, Cheques, Consignments
+  const [treasuryAccounts, setTreasuryAccounts] = useState<Array<Record<string, unknown>>>([]);
+  const [treasuryTxs, setTreasuryTxs] = useState<Array<Record<string, unknown>>>([]);
+  const [chequesList, setChequesList] = useState<Array<Record<string, unknown>>>([]);
+  const [consignmentsList, setConsignmentsList] = useState<Array<Record<string, unknown>>>([]);
+  const [txForm, setTxForm] = useState({
+    kind: "receipts" as "receipts" | "payments",
+    account_id: "",
+    amount: "25000000.00",
+    payment_method: "BANK_TRANSFER",
+    description: "دریافت وجه از مشتری",
+  });
+
+  // Subscription
+  const [subCurrent, setSubCurrent] = useState<Record<string, unknown> | null>(null);
+  const [subPlans, setSubPlans] = useState<Array<Record<string, unknown>>>([]);
+  const [cbzForm, setCbzForm] = useState({
+    sku: "bos_pro_monthly",
+    purchase_token: "CBZ-VALID-TEST2026A1",
+  });
+
+  // Sync
+  const [syncData, setSyncData] = useState<Record<string, unknown> | null>(null);
+  const [syncStatus, setSyncStatus] = useState<Record<string, unknown> | null>(null);
+  const [pullOutput, setPullOutput] = useState<Record<string, unknown> | null>(null);
+
+  const loadTab = useCallback(
+    async (activeTab: OrgTab) => {
+      if (!orgId) return;
+      setLoading(true);
+      try {
+        if (activeTab === "dashboard") {
+          setDash(await apiFetch<Record<string, unknown>>("/api/v1/reports/dashboard", { organizationId: orgId }));
+        } else if (activeTab === "accounting") {
+          const [accRes, fyRes, jRes, tbRes, plRes] = await Promise.all([
+            apiFetch<{ accounts: Array<Record<string, unknown>> }>("/api/v1/accounting/accounts", { organizationId: orgId }),
+            apiFetch<{ periods: Array<Record<string, unknown>> }>("/api/v1/accounting/fiscal-years", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/accounting/journal-entries?per_page=50", { organizationId: orgId }),
+            apiFetch<Record<string, unknown>>("/api/v1/accounting/trial-balance", { organizationId: orgId }),
+            apiFetch<Record<string, unknown>>("/api/v1/accounting/profit-loss", { organizationId: orgId }),
+          ]);
+          setAccountsList(accRes.accounts);
+          setPeriods(fyRes.periods);
+          setJournals(jRes);
+          setTrialBalance(tbRes);
+          setProfitLoss(plRes);
+          if (accRes.accounts.length >= 2 && !jForm.lines[0].account_id) {
+            setJForm((prev) => ({
+              ...prev,
+              lines: [
+                { ...prev.lines[0], account_id: String(accRes.accounts[accRes.accounts.length - 1].id) },
+                { ...prev.lines[1], account_id: String(accRes.accounts[1].id) },
+              ],
+            }));
+          }
+        } else if (activeTab === "inventory") {
+          const [whs, stk, movs, trs, cnts, prods] = await Promise.all([
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/warehouses?per_page=50", { organizationId: orgId }),
+            apiFetch<Record<string, unknown>>("/api/v1/inventory/stock", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/inventory/movements?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/inventory/transfers?per_page=30", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/inventory/counts?per_page=30", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/products?per_page=100", { organizationId: orgId }),
+          ]);
+          setWarehousesList(whs);
+          setStockData(stk);
+          setMovements(movs);
+          setTransfers(trs);
+          setCounts(cnts);
+          setProductsList(prods);
+          if (whs.length > 0 && !transferForm.source_warehouse_id) {
+            setTransferForm((p) => ({
+              ...p,
+              source_warehouse_id: String(whs[0].id),
+              destination_warehouse_id: String(whs[1]?.id ?? whs[0].id),
+              product_id: String(prods[0]?.id ?? ""),
+            }));
+            setCountForm((p) => ({
+              ...p,
+              warehouse_id: String(whs[0].id),
+              product_id: String(prods[0]?.id ?? ""),
+            }));
+          }
+        } else if (activeTab === "catalog") {
+          const [prods, cats, brds, unts] = await Promise.all([
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/products?per_page=100", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/categories", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/brands", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/units", { organizationId: orgId }),
+          ]);
+          setProductsList(prods);
+          setCatalogMeta({ categories: cats, brands: brds, units: unts });
+          if (unts.length > 0 && !prodForm.base_unit_id) {
+            setProdForm((p) => ({ ...p, base_unit_id: String(unts[0].id) }));
+          }
+        } else if (activeTab === "contacts") {
+          setContactsList(
+            await apiFetch<Array<Record<string, unknown>>>("/api/v1/contacts?per_page=100", { organizationId: orgId })
+          );
+        } else if (activeTab === "commerce") {
+          const [sList, pList, cList, wList, prList] = await Promise.all([
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/sales?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/purchases?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/contacts?per_page=100", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/warehouses?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/products?per_page=100", { organizationId: orgId }),
+          ]);
+          setSalesList(sList);
+          setPurchasesList(pList);
+          setContactsList(cList);
+          setWarehousesList(wList);
+          setProductsList(prList);
+          if (cList.length > 0 && !saleForm.customer_id) {
+            setSaleForm((p) => ({
+              ...p,
+              customer_id: String(cList[0].id),
+              warehouse_id: String(wList[0]?.id ?? ""),
+              product_id: String(prList[0]?.id ?? ""),
+              unit_price: String(prList[0]?.sale_price ?? "10000000.00"),
+            }));
+          }
+        } else if (activeTab === "treasury") {
+          const [accs, txs, chqs, cons] = await Promise.all([
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/treasury/accounts", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/treasury/transactions?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/cheques?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/consignments?per_page=50", { organizationId: orgId }),
+          ]);
+          setTreasuryAccounts(accs);
+          setTreasuryTxs(txs);
+          setChequesList(chqs);
+          setConsignmentsList(cons);
+          if (accs.length > 0 && !txForm.account_id) {
+            setTxForm((p) => ({ ...p, account_id: String(accs[0].id) }));
+          }
+        } else if (activeTab === "subscription") {
+          const [cur, plns] = await Promise.all([
+            apiFetch<Record<string, unknown>>("/api/v1/subscription/current", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/subscription/plans", { organizationId: orgId }),
+          ]);
+          setSubCurrent(cur);
+          setSubPlans(plns);
+        } else if (activeTab === "sync") {
+          const [sRes, stRes, cList, wList, pList] = await Promise.all([
+            apiFetch<Record<string, unknown>>("/api/v1/sync/conflicts", { organizationId: orgId }),
+            apiFetch<Record<string, unknown>>("/api/v1/sync/status", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/contacts?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/warehouses?per_page=50", { organizationId: orgId }),
+            apiFetch<Array<Record<string, unknown>>>("/api/v1/products?per_page=50", { organizationId: orgId }),
+          ]);
+          setSyncData(sRes);
+          setSyncStatus(stRes);
+          setContactsList(cList);
+          setWarehousesList(wList);
+          setProductsList(pList);
+        }
+      } catch (e) {
+        onToast(e instanceof Error ? e.message : "خطا در دریافت داده‌های سازمان", "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [orgId, onToast]
+  );
+
+  useEffect(() => {
+    loadTab(tab);
+  }, [tab, orgId, loadTab]);
+
+  // ============================================================================
+  // Handlers
+  // ============================================================================
+
+  async function submitJournal(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/accounting/journal-entries", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          client_document_id: crypto.randomUUID(),
+          document_date: jForm.document_date,
+          description: jForm.description,
+          confirm_immediately: jForm.confirm_immediately,
+          ...(jForm.accounting_period_id ? { accounting_period_id: jForm.accounting_period_id } : {}),
+          lines: jForm.lines,
+        }),
+      });
+      onToast(
+        jForm.confirm_immediately
+          ? "سند حسابداری دوبل با تراز کامل قطعی و در دفتر کل ثبت شد."
+          : "پیش‌نویس سند حسابداری ذخیره شد."
+      );
+      setShowJournalForm(false);
+      setJForm({ ...jForm, description: "" });
+      loadTab("accounting");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در ثبت سند حسابداری", "error");
+    }
+  }
+
+  async function confirmJournal(id: string) {
+    try {
+      await apiFetch(`/api/v1/accounting/journal-entries/${id}/confirm`, {
+        method: "POST",
+        organizationId: orgId,
+      });
+      onToast("سند پیش‌نویس قطعی (CONFIRMED) شد و از این پس تغییرناپذیر است.");
+      loadTab("accounting");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در قطعی‌سازی", "error");
+    }
+  }
+
+  async function reverseJournal(id: string) {
+    try {
+      await apiFetch(`/api/v1/accounting/journal-entries/${id}/reverse`, {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({ reason: "اصلاح حسابداری از طریق سند معکوس رسمی" }),
+      });
+      onToast("سند معکوس رسمی ایجاد و اثر مالی سند قبلی بدون حذف فیزیکی خنثی شد.");
+      loadTab("accounting");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در صدور سند معکوس", "error");
+    }
+  }
+
+  async function togglePeriod(id: string, currentStatus: string) {
+    try {
+      const nextStatus = currentStatus === "OPEN" ? "CLOSED" : "OPEN";
+      await apiFetch(`/api/v1/accounting/periods/${id}`, {
+        method: "PATCH",
+        organizationId: orgId,
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      onToast(`دوره مالی به وضعیت ${nextStatus === "CLOSED" ? "بسته (CLOSED)" : "باز (OPEN)"} تغییر یافت.`);
+      loadTab("accounting");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در تغییر وضعیت دوره", "error");
+    }
+  }
+
+  async function executeTransfer(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/inventory/transfers", {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({
+          ...transferForm,
+          transfer_date: new Date().toISOString().slice(0, 10),
+        }),
+      });
+      onToast("انتقال اتمیک انبار انجام شد: خروج از مبدأ و ورود به مقصد در یک تراکنش ثبت گردید.");
+      loadTab("inventory");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در انتقال انبار", "error");
+    }
+  }
+
+  async function executeStockCount(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/inventory/counts", {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({
+          warehouse_id: countForm.warehouse_id,
+          count_date: new Date().toISOString().slice(0, 10),
+          notes: countForm.notes,
+          items: [{ product_id: countForm.product_id, counted_qty: countForm.counted_qty }],
+        }),
+      });
+      onToast("انبارگردانی تایید و سند تعدیل اختلاف موجودی به صورت خودکار در Stock Ledger ثبت شد.");
+      loadTab("inventory");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در انبارگردانی", "error");
+    }
+  }
+
+  async function lookupBarcode() {
+    try {
+      const res = await apiFetch<Record<string, unknown>>(
+        `/api/v1/products/barcode/${encodeURIComponent(barcodeInput.trim())}`,
+        { organizationId: orgId }
+      );
+      setBarcodeResult(res);
+      onToast(`کالا با بارکد ${barcodeInput} یافت شد.`);
+    } catch (err) {
+      setBarcodeResult(null);
+      onToast(err instanceof Error ? err.message : "بارکد یافت نشد", "error");
+    }
+  }
+
+  async function createProduct(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/products", {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify(prodForm),
+      });
+      onToast("کالای جدید در کاتالوگ ثبت شد.");
+      setProdForm({ ...prodForm, code: "", name: "", barcode: "" });
+      loadTab("catalog");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در ثبت کالا", "error");
+    }
+  }
+
+  async function createContact(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/contacts", {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify(contactForm),
+      });
+      onToast("طرف‌حساب جدید با موفقیت ثبت شد.");
+      setContactForm({ code: "", display_name: "", type: "CUSTOMER", mobile: "", credit_limit: "100000000.00" });
+      loadTab("contacts");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در ثبت طرف‌حساب", "error");
+    }
+  }
+
+  async function createDraftSale(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/sales", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          client_document_id: crypto.randomUUID(),
+          customer_id: saleForm.customer_id,
+          warehouse_id: saleForm.warehouse_id,
+          document_date: new Date().toISOString().slice(0, 10),
+          items: [
+            {
+              product_id: saleForm.product_id,
+              quantity: saleForm.quantity,
+              unit_price: saleForm.unit_price,
+            },
+          ],
+        }),
+      });
+      onToast("پیش‌نویس فاکتور فروش ایجاد شد. برای صدور سند انبار و حسابداری آن را تایید کنید.");
+      loadTab("commerce");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در ایجاد فاکتور", "error");
+    }
+  }
+
+  async function confirmInvoice(type: "sales" | "purchases", id: string) {
+    try {
+      await apiFetch(`/api/v1/${type}/${id}/confirm`, {
+        method: "POST",
+        organizationId: orgId,
+      });
+      onToast(
+        type === "sales"
+          ? "فاکتور فروش تایید شد + حواله خروج انبار + سند حسابداری فروش و بهای تمام‌شده به‌صورت اتمیک ثبت گردید."
+          : "فاکتور خرید تایید شد + رسید ورود انبار + سند حسابداری خرید به‌صورت اتمیک ثبت گردید."
+      );
+      loadTab("commerce");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در تایید فاکتور", "error");
+    }
+  }
+
+  async function recordTreasuryTx(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch(`/api/v1/treasury/${txForm.kind}`, {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({
+          account_id: txForm.account_id,
+          amount: txForm.amount,
+          payment_method: txForm.payment_method,
+          transaction_date: new Date().toISOString().slice(0, 10),
+          description: txForm.description,
+        }),
+      });
+      onToast("تراکنش خزانه‌داری ثبت و موجودی حساب به‌روزرسانی شد.");
+      loadTab("treasury");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در ثبت خزانه", "error");
+    }
+  }
+
+  async function transitionCheque(chequeId: string, action: "deposit" | "cash" | "bounce") {
+    try {
+      await apiFetch(`/api/v1/cheques/${chequeId}/${action}`, {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({ note: `ثبت رویداد ${action} از پنل سازمانی` }),
+      });
+      onToast(`رویداد چک (${action.toUpperCase()}) با موفقیت در تاریخچه چک ثبت شد.`);
+      loadTab("treasury");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در تغییر وضعیت چک", "error");
+    }
+  }
+
+  async function settleConsignment(docId: string) {
+    try {
+      await apiFetch(`/api/v1/consignments/${docId}/settlements`, {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({ gross_sales: "158000000.00" }),
+      });
+      onToast("تسویه کالای امانی با کسر کارمزد دقیق Decimal انجام شد.");
+      loadTab("treasury");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در تسویه امانی", "error");
+    }
+  }
+
+  async function verifyCafeBazaar(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/subscription/market/verify", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": `cbz-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+        body: JSON.stringify({
+          package_name: "ir.businessos.app",
+          sku: cbzForm.sku,
+          purchase_token: cbzForm.purchase_token,
+        }),
+      });
+      onToast("رسید کافه‌بازار در سرور تایید و اشتراک + Entitlementهای سازمان فعال شد!");
+      await onRefreshSession();
+      loadTab("subscription");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "تایید رسید ناموفق بود", "error");
+    }
+  }
+
+  async function exportAllData() {
+    try {
+      const data = await apiFetch<Record<string, unknown>>("/api/v1/export", { organizationId: orgId });
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `business-os-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      onToast("خروجی کامل داده‌های سازمان (JSON) بدون محدودیت اشتراک دریافت شد.");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در دریافت خروجی", "error");
+    }
+  }
+
+  async function simulateOfflinePush(mode: "CONTACT_CREATE" | "CONFLICT" | "OFFLINE_PURCHASE" | "STOCK_RACE") {
+    const devList = (syncData?.devices as Array<Record<string, unknown>>) ?? [];
+    const dev = devList[0];
+    if (!dev) {
+      onToast("دستگاه اندرویدی برای این سازمان ثبت نشده است.", "error");
+      return;
+    }
+    const targetContact = contactsList[0];
+    const targetWh = warehousesList[0];
+    const targetProd = productsList[0];
+
+    try {
+      const batchId = crypto.randomUUID();
+      let events: Array<Record<string, unknown>> = [];
+
+      if (mode === "CONFLICT" && targetContact) {
+        events = [
+          {
+            event_id: crypto.randomUUID(),
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "contact",
+            entity_id: String(targetContact.id),
+            operation: "UPDATE",
+            base_version: 0,
+            dependencies: [],
+            payload: {
+              display_name: `${String(targetContact.display_name)} (تغییر آفلاین اندروید)`,
+              mobile: "09120009988",
+            },
+          },
+        ];
+      } else if (mode === "OFFLINE_PURCHASE" && targetContact && targetWh && targetProd) {
+        const docUuid = crypto.randomUUID();
+        const createEvtId = crypto.randomUUID();
+        events = [
+          {
+            event_id: createEvtId,
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "purchase",
+            entity_id: docUuid,
+            operation: "CREATE",
+            base_version: null,
+            dependencies: [],
+            payload: {
+              supplier_id: String(targetContact.id),
+              warehouse_id: String(targetWh.id),
+              document_date: new Date().toISOString().slice(0, 10),
+              items: [{ product_id: String(targetProd.id), quantity: "2.0000", unit_price: "42000000.00" }],
+            },
+          },
+          {
+            event_id: crypto.randomUUID(),
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "purchase",
+            entity_id: docUuid,
+            operation: "CONFIRM",
+            base_version: 1,
+            dependencies: [createEvtId],
+            payload: {},
+          },
+        ];
+      } else if (mode === "STOCK_RACE" && targetContact && targetWh && targetProd) {
+        const docUuid = crypto.randomUUID();
+        const createEvtId = crypto.randomUUID();
+        events = [
+          {
+            event_id: createEvtId,
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "sales",
+            entity_id: docUuid,
+            operation: "CREATE",
+            base_version: null,
+            dependencies: [],
+            payload: {
+              customer_id: String(targetContact.id),
+              warehouse_id: String(targetWh.id),
+              document_date: new Date().toISOString().slice(0, 10),
+              items: [{ product_id: String(targetProd.id), quantity: "999.0000", unit_price: "54000000.00" }],
+            },
+          },
+          {
+            event_id: crypto.randomUUID(),
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "sales",
+            entity_id: docUuid,
+            operation: "CONFIRM",
+            base_version: 1,
+            dependencies: [createEvtId],
+            payload: {},
+          },
+        ];
+      } else {
+        const newUuid = crypto.randomUUID();
+        events = [
+          {
+            event_id: crypto.randomUUID(),
+            idempotency_key: crypto.randomUUID(),
+            entity_type: "contact",
+            entity_id: newUuid,
+            operation: "CREATE",
+            base_version: null,
+            dependencies: [],
+            payload: {
+              code: `C-MOB-${Math.floor(Math.random() * 900 + 100)}`,
+              display_name: `مشتری آفلاین Room #${Math.floor(Math.random() * 90 + 10)}`,
+              type: "CUSTOMER",
+              mobile: "09128889900",
+            },
+          },
+        ];
+      }
+
+      const res = await apiFetch<Record<string, unknown>>("/api/v1/sync/push", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          device_id: String(dev.id),
+          batch_id: batchId,
+          events,
+        }),
+      });
+      onToast(
+        `Push انجام شد — اعمال/تایید: ${String(res.applied_count)} | تعارض: ${String(res.conflict_count)} | تکراری: ${String(res.duplicate_count)}`
+      );
+      loadTab("sync");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در Sync Push", "error");
+    }
+  }
+
+  async function simulateOfflinePullAndAck() {
+    const devList = (syncData?.devices as Array<Record<string, unknown>>) ?? [];
+    const dev = devList[0];
+    if (!dev) return;
+    try {
+      const delta = await apiFetch<Record<string, unknown>>(
+        `/api/v1/sync/pull?device_id=${String(dev.id)}&limit=30`,
+        { organizationId: orgId }
+      );
+      setPullOutput(delta);
+      if (delta.next_cursor) {
+        await apiFetch("/api/v1/sync/acknowledge", {
+          method: "POST",
+          organizationId: orgId,
+          body: JSON.stringify({ device_id: String(dev.id), cursor: String(delta.next_cursor) }),
+        });
+      }
+      onToast(`Pull با Opaque Cursor و Acknowledge موفق (${((delta.changes as unknown[]) ?? []).length} تغییر دریافت شد).`);
+      loadTab("sync");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در Sync Pull", "error");
+    }
+  }
+
+  async function triggerProtectedResetCheckpoint() {
+    const devList = (syncData?.devices as Array<Record<string, unknown>>) ?? [];
+    const dev = devList[0];
+    if (!dev) return;
+    try {
+      await apiFetch("/api/v1/sync/reset-checkpoint", {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({ device_id: String(dev.id), reason: "بازنشانی ایمن Cursor بدون حذف داده‌های محلی" }),
+      });
+      onToast("Checkpoint دستگاه با حفظ کامل داده‌های محلی بازنشانی و در Audit Log ثبت شد.");
+      loadTab("sync");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در بازنشانی Cursor", "error");
+    }
+  }
+
+  async function resolveOrgConflict(
+    id: string,
+    resolution: "USE_SERVER" | "USE_LOCAL" | "MERGE" | "RECREATE_AS_NEW"
+  ) {
+    try {
+      await apiFetch(`/api/v1/sync/conflicts/${id}/resolve`, {
+        method: "POST",
+        organizationId: orgId,
+        body: JSON.stringify({ resolution }),
+      });
+      onToast(`تعارض با استراتژی ${resolution} برطرف و در Change Log منتشر شد.`);
+      loadTab("sync");
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "خطا در رفع تعارض", "error");
+    }
+  }
+
+  const showToastAlias = (fn: (m: string, t?: "success" | "error") => void) => fn;
+  const kpis = (dash?.kpis ?? {}) as Record<string, string | number | boolean>;
+  const isExpired = session.subscription?.status === "EXPIRED";
+
+  const formDebitSum = jForm.lines.reduce((s, l) => s + (Number(l.debit) || 0), 0);
+  const formCreditSum = jForm.lines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
+  const formBalanced = formDebitSum > 0 && Math.abs(formDebitSum - formCreditSum) < 0.001;
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <aside className="lg:col-span-3 xl:col-span-2 bg-white rounded-2xl border border-slate-200 p-3 shadow-xs lg:sticky lg:top-20">
+        <div className="px-3 py-2 mb-2 rounded-xl bg-emerald-50 border border-emerald-100">
+          <div className="text-[11px] font-bold text-emerald-800 truncate">
+            {session.active_organization?.name}
+          </div>
+          <div className="text-[10px] text-emerald-700 mt-0.5">
+            پلن: {session.subscription?.plan_name_fa ?? "رایگان"} •{" "}
+            {isExpired ? "منقضی (فقط مشاهده و خروجی)" : "فعال"}
+          </div>
+        </div>
+        <nav className="space-y-1">
+          {ORG_TABS.map((item) => {
+            const Icon = item.icon;
+            const active = tab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setTab(item.id)}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                  active
+                    ? "bg-emerald-700 text-white shadow-xs"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="truncate">{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
+
+      <section className="lg:col-span-9 xl:col-span-10 space-y-5 min-w-0">
+        {isExpired && (
+          <div className="rounded-2xl border border-amber-300 bg-amber-50 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>اشتراک این سازمان منقضی شده است:</strong> هیچ‌یک از داده‌های شما حذف نمی‌شود و دسترسی کامل به مشاهده و خروجی داده (Export) دارید؛ برای ثبت عملیات جدید از تب اشتراک تمدید کنید.
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={exportAllData}
+                className="rounded-xl bg-white border border-amber-300 px-3 py-1.5 font-medium hover:bg-amber-100 cursor-pointer"
+              >
+                خروجی کامل داده‌ها
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("subscription")}
+                className="rounded-xl bg-amber-600 text-white px-3 py-1.5 font-medium cursor-pointer"
+              >
+                تمدید با کافه‌بازار
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-white rounded-2xl border border-slate-200 px-5 py-4">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">
+              {ORG_TABS.find((t) => t.id === tab)?.label}
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              فضای کاری ایزوله‌شده سازمان • مصرف مستقیم قرارداد استاندارد /api/v1
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadTab(tab)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>بروزرسانی</span>
+          </button>
+        </div>
+
+        {/* MASTER PROMPT 06 — GLASSMORPHISM DASHBOARD WITH 3 DAILY CHARTS */}
+        {tab === "dashboard" && (
+          <GlassDashboard
+            orgId={orgId}
+            onNavigate={(next) => setTab(next as OrgTab)}
+            onToast={onToast}
+          />
+        )}
+
+        {/* MASTER PROMPT 06 — SETTINGS: THEME + USERS & ACCESS MANAGEMENT */}
+        {tab === "settings_access" && (
+          <UserAccessSettings orgId={orgId} onToast={onToast} />
+        )}
+
+        {/* MASTER PROMPT 06 — CHART OF ACCOUNTS, OPENING BALANCES & FISCAL YEAR LIFECYCLE */}
+        {tab === "fiscal_lifecycle" && (
+          <FiscalLifecyclePanel orgId={orgId} onToast={onToast} />
+        )}
+
+        {/* ADVANCED MASTER PROMPT 05 MODULES */}
+        {ADVANCED_TABS.has(tab) && (
+          <AdvancedModulesPanel
+            orgId={orgId}
+            activeTab={tab as AdvancedSubTab}
+            onToast={showToastAlias(onToast)}
+          />
+        )}
+
+        {/* LEGACY COMPACT DASHBOARD SNAPSHOT (superseded by GlassDashboard) */}
+        {false && tab === "dashboard" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {[
+                { label: "درآمد فروش (دفتر کل)", val: `${formatIrr(kpis.total_revenue as string)} ریال`, sub: `سود خالص: ${formatIrr(kpis.net_profit as string)} ریال`, tone: "text-emerald-700 bg-emerald-50" },
+                { label: "ارزش موجودی انبار (Ledger)", val: `${formatIrr(kpis.inventory_valuation as string)} ریال`, sub: `${kpis.products_count ?? 0} قلم کالا`, tone: "text-teal-700 bg-teal-50" },
+                { label: "موجودی نقد و بانک", val: `${formatIrr(kpis.cash_and_bank_total as string)} ریال`, sub: `${kpis.contacts_count ?? 0} طرف‌حساب فعال`, tone: "text-indigo-700 bg-indigo-50" },
+                { label: "سلامت تراز و Sync", val: kpis.is_trial_balanced ? "تراز ۱۰۰٪ دقیق" : "نیاز به بررسی", sub: `${kpis.devices_count ?? 0} دستگاه • ${kpis.open_conflicts_count ?? 0} تعارض`, tone: "text-slate-700 bg-slate-100" },
+              ].map((c) => (
+                <div key={c.label} className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <div className="text-xs text-slate-500">{c.label}</div>
+                  <div className="text-lg font-bold text-slate-900 mt-2 tabular-nums">{c.val}</div>
+                  <div className={`inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full ${c.tone}`}>
+                    {c.sub}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">آخرین اسناد حسابداری</h3>
+                <div className="space-y-2">
+                  {((dash?.recent_journals as Array<Record<string, unknown>>) ?? []).map((j) => (
+                    <div key={String(j.id)} className="flex items-center justify-between rounded-xl bg-slate-50 border border-slate-100 px-3.5 py-2.5 text-xs">
+                      <div>
+                        <div className="font-semibold text-slate-800">
+                          سند #{String(j.entry_number)} — {String(j.description)}
+                        </div>
+                        <div className="text-[11px] text-slate-400">{String(j.entry_date)}</div>
+                      </div>
+                      <div className="text-left">
+                        <div className="font-semibold tabular-nums">{formatIrr(j.total_debit as string)} ریال</div>
+                        <span className="text-[10px] font-mono text-emerald-700">{String(j.status)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">چک‌های پیش‌رو و خزانه</h3>
+                <div className="space-y-2">
+                  {((dash?.pending_cheques as Array<Record<string, unknown>>) ?? []).map((ch) => (
+                    <div key={String(ch.id)} className="flex items-center justify-between rounded-xl bg-slate-50 border border-slate-100 px-3.5 py-2.5 text-xs">
+                      <div>
+                        <div className="font-semibold text-slate-800">
+                          {String(ch.bank_name)} — صیاد {String(ch.sayad_id)}
+                        </div>
+                        <div className="text-[11px] text-slate-400">سررسید: {String(ch.due_date)}</div>
+                      </div>
+                      <div className="text-left">
+                        <div className="font-semibold tabular-nums">{formatIrr(ch.amount as string)} ریال</div>
+                        <span className="text-[10px] font-mono text-indigo-700">{String(ch.status)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. ACCOUNTING */}
+        {tab === "accounting" && (
+          <div className="space-y-5">
+            {/* Periods bar */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h3 className="text-xs font-bold text-slate-800">کنترل دوره‌های مالی (بستن/بازگشایی دوره)</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowJournalForm(!showJournalForm)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white px-3.5 py-1.5 text-xs font-medium cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>ثبت سند حسابداری دوبل جدید</span>
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {periods.map((p) => (
+                  <div
+                    key={String(p.id)}
+                    className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${
+                      p.status === "CLOSED"
+                        ? "bg-rose-50/70 border-rose-200 text-rose-800"
+                        : "bg-emerald-50/70 border-emerald-200 text-emerald-800"
+                    }`}
+                  >
+                    {p.status === "CLOSED" && <Lock className="h-3.5 w-3.5" />}
+                    <span className="font-medium">{String(p.name)}</span>
+                    <button
+                      type="button"
+                      onClick={() => togglePeriod(String(p.id), String(p.status))}
+                      className="text-[10px] underline cursor-pointer"
+                    >
+                      {p.status === "CLOSED" ? "بازگشایی" : "بستن دوره"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {showJournalForm && (
+              <form onSubmit={submitJournal} className="bg-white rounded-2xl border border-emerald-200 p-5 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">تاریخ سند (YYYY-MM-DD)</label>
+                    <input
+                      dir="ltr"
+                      value={jForm.document_date}
+                      onChange={(e) => setJForm({ ...jForm, document_date: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-left"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">دوره مالی (تست دوره بسته!)</label>
+                    <select
+                      value={jForm.accounting_period_id}
+                      onChange={(e) => setJForm({ ...jForm, accounting_period_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs"
+                    >
+                      <option value="">انتخاب خودکار دوره باز</option>
+                      {periods.map((p) => (
+                        <option key={String(p.id)} value={String(p.id)}>
+                          {String(p.name)} [{String(p.status)}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">شرح سند *</label>
+                    <input
+                      required
+                      placeholder="مثلاً: ثبت هزینه اجاره و نگهداری انبار"
+                      value={jForm.description}
+                      onChange={(e) => setJForm({ ...jForm, description: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-slate-700">آرتیکل‌های سند (مبالغ به صورت Decimal String)</div>
+                  {jForm.lines.map((line, idx) => (
+                    <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                      <select
+                        required
+                        value={line.account_id}
+                        onChange={(e) => {
+                          const next = [...jForm.lines];
+                          next[idx] = { ...next[idx], account_id: e.target.value };
+                          setJForm({ ...jForm, lines: next });
+                        }}
+                        className="md:col-span-5 rounded-xl border border-slate-200 px-3 py-2 text-xs"
+                      >
+                        <option value="">انتخاب حساب معین...</option>
+                        {accountsList.map((a) => (
+                          <option key={String(a.id)} value={String(a.id)}>
+                            {String(a.code)} — {String(a.name)}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        dir="ltr"
+                        placeholder="بدهکار"
+                        value={line.debit}
+                        onChange={(e) => {
+                          const next = [...jForm.lines];
+                          next[idx] = { ...next[idx], debit: e.target.value };
+                          setJForm({ ...jForm, lines: next });
+                        }}
+                        className="md:col-span-3 rounded-xl border border-slate-200 px-3 py-2 text-xs text-left font-mono"
+                      />
+                      <input
+                        dir="ltr"
+                        placeholder="بستانکار"
+                        value={line.credit}
+                        onChange={(e) => {
+                          const next = [...jForm.lines];
+                          next[idx] = { ...next[idx], credit: e.target.value };
+                          setJForm({ ...jForm, lines: next });
+                        }}
+                        className="md:col-span-3 rounded-xl border border-slate-200 px-3 py-2 text-xs text-left font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (jForm.lines.length <= 2) return;
+                          setJForm({ ...jForm, lines: jForm.lines.filter((_, i) => i !== idx) });
+                        }}
+                        className="md:col-span-1 rounded-xl border border-slate-200 text-xs text-slate-500 hover:bg-rose-50 hover:text-rose-600 cursor-pointer"
+                      >
+                        حذف
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
+                  <div className="flex items-center gap-4">
+                    <span className="tabular-nums">جمع بدهکار: <strong>{formatIrr(formDebitSum)}</strong></span>
+                    <span className="tabular-nums">جمع بستانکار: <strong>{formatIrr(formCreditSum)}</strong></span>
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full font-semibold ${
+                        formBalanced ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-700"
+                      }`}
+                    >
+                      {formBalanced ? "سند تراز است ✓" : "سند تراز نیست (سرور رد می‌کند)"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={jForm.confirm_immediately}
+                        onChange={(e) => setJForm({ ...jForm, confirm_immediately: e.target.checked })}
+                      />
+                      <span>قطعی‌سازی مستقیم (CONFIRMED)</span>
+                    </label>
+                    <button type="submit" className="rounded-xl bg-emerald-700 text-white px-5 py-2 font-medium cursor-pointer">
+                      ثبت سند
+                    </button>
+                  </div>
+                </div>
+              </form>
+            )}
+
+            {/* Journal Entries Table */}
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+              <div className="px-5 py-3.5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-xs text-slate-800">
+                  دفتر روزنامه و اسناد حسابداری (سند قطعی تغییرناپذیر است؛ اصلاح فقط با سند معکوس)
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!orgId) return;
+                    const res = await fetch("/api/v1/accounting/journal-book/export", {
+                      headers: { "X-Organization-Id": orgId, "X-Client-Version": "1.0.0" },
+                      credentials: "include",
+                    });
+                    if (!res.ok) {
+                      onToast("خطا در دریافت خروجی اکسل دفتر روزنامه", "error");
+                      return;
+                    }
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `journal-book-${new Date().toISOString().slice(0, 10)}.xlsx`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    onToast("فایل اکسل دفتر روزنامه (.xlsx) دانلود شد.");
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-1.5 text-[11px] font-medium cursor-pointer hover:bg-emerald-100"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  <span>خروجی اکسل دفتر روزنامه (.xlsx)</span>
+                </button>
+              </div>
+              <table className="w-full text-xs text-right">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                  <tr>
+                    <th className="px-4 py-3">شماره / تاریخ</th>
+                    <th className="px-4 py-3">شرح و آرتیکل‌ها</th>
+                    <th className="px-4 py-3">بدهکار / بستانکار</th>
+                    <th className="px-4 py-3">وضعیت تجاری</th>
+                    <th className="px-4 py-3">عملیات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {journals.map((j) => (
+                    <tr key={String(j.id)} className="align-top">
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="font-bold text-slate-900">سند #{String(j.document_number)}</div>
+                        <div className="text-[11px] font-mono text-slate-400">{String(j.document_date)}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-slate-900 mb-1.5">{String(j.description)}</div>
+                        <div className="space-y-1">
+                          {((j.lines as Array<Record<string, unknown>>) ?? []).map((l) => (
+                            <div key={String(l.id)} className="flex items-center justify-between text-[11px] bg-slate-50 px-2.5 py-1 rounded-lg">
+                              <span>{String(l.account_code)} — {String(l.account_name)}</span>
+                              <span className="font-mono tabular-nums text-slate-600">
+                                {Number(l.debit) > 0 ? `بد: ${formatIrr(l.debit as string)}` : `بس: ${formatIrr(l.credit as string)}`}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 font-mono tabular-nums whitespace-nowrap">
+                        <div>بد: {formatIrr(j.total_debit as string)}</div>
+                        <div className="text-slate-500">بس: {formatIrr(j.total_credit as string)}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            j.status === "CONFIRMED"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : j.status === "REVERSED"
+                                ? "bg-slate-200 text-slate-700"
+                                : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {String(j.status)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {j.status === "DRAFT" && (
+                          <button
+                            type="button"
+                            onClick={() => confirmJournal(String(j.id))}
+                            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 text-white px-2.5 py-1 text-[11px] cursor-pointer"
+                          >
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            <span>قطعی‌سازی</span>
+                          </button>
+                        )}
+                        {j.status === "CONFIRMED" && (
+                          <button
+                            type="button"
+                            onClick={() => reverseJournal(String(j.id))}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-2.5 py-1 text-[11px] cursor-pointer"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            <span>سند معکوس</span>
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Trial Balance & Profit/Loss Reconstructed from Ledger */}
+            {trialBalance && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 overflow-x-auto">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
+                    <span>تراز آزمایشی بازسازی‌شده مستقیم از دفتر کل (Trial Balance)</span>
+                  </h3>
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 font-semibold">
+                      {trialBalance.is_balanced ? "تراز کل برقرار است ✓" : "نامتوازن!"}
+                    </span>
+                    {profitLoss && (
+                      <span className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-800 font-semibold tabular-nums">
+                        سود خالص: {formatIrr(profitLoss.net_profit as string)} ریال
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <table className="w-full text-xs text-right">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2.5">کد حساب</th>
+                      <th className="px-3 py-2.5">عنوان حساب</th>
+                      <th className="px-3 py-2.5">ماهیت</th>
+                      <th className="px-3 py-2.5">گردش بدهکار</th>
+                      <th className="px-3 py-2.5">گردش بستانکار</th>
+                      <th className="px-3 py-2.5">مانده نهایی</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 tabular-nums">
+                    {((trialBalance.rows as Array<Record<string, unknown>>) ?? []).map((r) => (
+                      <tr key={String(r.account_id)}>
+                        <td className="px-3 py-2 font-mono">{String(r.code)}</td>
+                        <td className="px-3 py-2 font-medium">{String(r.name)}</td>
+                        <td className="px-3 py-2 text-[11px] font-mono text-slate-500">{String(r.account_type)}</td>
+                        <td className="px-3 py-2">{formatIrr(r.total_debit as string)}</td>
+                        <td className="px-3 py-2">{formatIrr(r.total_credit as string)}</td>
+                        <td className="px-3 py-2 font-semibold">{formatIrr(r.net_balance as string)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 3. INVENTORY */}
+        {tab === "inventory" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Atomic Warehouse Transfer */}
+              <form onSubmit={executeTransfer} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ArrowLeftRight className="h-4 w-4 text-teal-600" />
+                  <span>انتقال اتمیک بین انبارها (Atomic Transfer)</span>
+                </h3>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-600 mb-1">انبار مبدأ</label>
+                    <select
+                      value={transferForm.source_warehouse_id}
+                      onChange={(e) => setTransferForm({ ...transferForm, source_warehouse_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                    >
+                      {warehousesList.map((w) => (
+                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">انبار مقصد</label>
+                    <select
+                      value={transferForm.destination_warehouse_id}
+                      onChange={(e) => setTransferForm({ ...transferForm, destination_warehouse_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                    >
+                      {warehousesList.map((w) => (
+                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">کالا</label>
+                    <select
+                      value={transferForm.product_id}
+                      onChange={(e) => setTransferForm({ ...transferForm, product_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                    >
+                      {productsList.map((p) => (
+                        <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">تعداد انتقال (Decimal)</label>
+                    <input
+                      dir="ltr"
+                      value={transferForm.quantity}
+                      onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left font-mono"
+                    />
+                  </div>
+                </div>
+                <button type="submit" className="w-full rounded-xl bg-teal-700 hover:bg-teal-800 text-white py-2 text-xs font-medium cursor-pointer">
+                  اجرای انتقال اتمیک انبار
+                </button>
+              </form>
+
+              {/* Stock Count & Variance Adjustment */}
+              <form onSubmit={executeStockCount} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ClipboardCheck className="h-4 w-4 text-indigo-600" />
+                  <span>انبارگردانی و صدور سند تعدیل اختلاف (Stock Count)</span>
+                </h3>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-600 mb-1">انبار</label>
+                    <select
+                      value={countForm.warehouse_id}
+                      onChange={(e) => setCountForm({ ...countForm, warehouse_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                    >
+                      {warehousesList.map((w) => (
+                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">کالا</label>
+                    <select
+                      value={countForm.product_id}
+                      onChange={(e) => setCountForm({ ...countForm, product_id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                    >
+                      {productsList.map((p) => (
+                        <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-slate-600 mb-1">موجودی واقعی شمارش‌شده</label>
+                    <input
+                      dir="ltr"
+                      value={countForm.counted_qty}
+                      onChange={(e) => setCountForm({ ...countForm, counted_qty: e.target.value })}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left font-mono"
+                    />
+                  </div>
+                </div>
+                <button type="submit" className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white py-2 text-xs font-medium cursor-pointer">
+                  تایید شمارش و ثبت سند تعدیل اختلاف در Ledger
+                </button>
+              </form>
+            </div>
+
+            {/* Live Stock Valuation from Stock Ledger */}
+            {stockData && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                  <h3 className="text-sm font-bold text-slate-900">موجودی لحظه‌ای و بهای تمام‌شده (Stock Ledger)</h3>
+                  <span className="text-xs font-bold text-teal-800 bg-teal-50 px-3 py-1 rounded-full tabular-nums">
+                    ارزش کل انبارها: {formatIrr(stockData.total_valuation as string)} ریال
+                  </span>
+                </div>
+                <table className="w-full text-xs text-right">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2.5">انبار</th>
+                      <th className="px-3 py-2.5">کالا</th>
+                      <th className="px-3 py-2.5">روش ارزش‌گذاری</th>
+                      <th className="px-3 py-2.5">موجودی فعلی</th>
+                      <th className="px-3 py-2.5">بهای واحد میانگین</th>
+                      <th className="px-3 py-2.5">ارزش کل (ریال)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 tabular-nums">
+                    {((stockData.balances as Array<Record<string, unknown>>) ?? []).map((b, i) => (
+                      <tr key={i}>
+                        <td className="px-3 py-2 font-medium">{String(b.warehouse_name)}</td>
+                        <td className="px-3 py-2">{String(b.product_name)} ({String(b.product_sku)})</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{String(b.costing_method)}</td>
+                        <td className="px-3 py-2 font-bold text-slate-900">{formatQty(b.on_hand_qty as string)}</td>
+                        <td className="px-3 py-2">{formatIrr(b.avg_unit_cost as string)}</td>
+                        <td className="px-3 py-2 font-semibold">{formatIrr(b.total_value as string)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Recent Stock Ledger Movements */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
+              <h3 className="text-sm font-bold text-slate-900 mb-3">
+                کاردکس گردش موجودی (Stock Ledger) — {transfers.length} انتقال • {counts.length} انبارگردانی
+              </h3>
+              <table className="w-full text-xs text-right">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-3 py-2.5">شماره سند / نوع</th>
+                    <th className="px-3 py-2.5">انبار / کالا</th>
+                    <th className="px-3 py-2.5">علت حرکت</th>
+                    <th className="px-3 py-2.5">تغییر مقدار</th>
+                    <th className="px-3 py-2.5">مانده بعد</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 tabular-nums">
+                  {movements.slice(0, 20).map((m) => (
+                    <tr key={String(m.id)}>
+                      <td className="px-3 py-2 font-mono text-[11px]">
+                        {String(m.document_number)} • {String(m.document_type)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {String(m.warehouse_name)} — {String(m.product_name)}
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">{String(m.reason)}</td>
+                      <td className={`px-3 py-2 font-bold ${Number(m.quantity_delta) >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                        {Number(m.quantity_delta) >= 0 ? "+" : ""}
+                        {formatQty(m.quantity_delta as string)}
+                      </td>
+                      <td className="px-3 py-2 font-semibold">{formatQty(m.balance_after_qty as string)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 4. CATALOG */}
+        {tab === "catalog" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Barcode Scanner Lookup */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ScanBarcode className="h-4 w-4 text-indigo-600" />
+                  <span>جستجوی سریع بارکد (/api/v1/products/barcode/...)</span>
+                </h3>
+                <div className="flex gap-2">
+                  <input
+                    dir="ltr"
+                    value={barcodeInput}
+                    onChange={(e) => setBarcodeInput(e.target.value)}
+                    className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono text-left"
+                  />
+                  <button
+                    type="button"
+                    onClick={lookupBarcode}
+                    className="rounded-xl bg-slate-900 text-white px-4 py-2 text-xs font-medium cursor-pointer"
+                  >
+                    استعلام بارکد
+                  </button>
+                </div>
+                {barcodeResult && (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-900">
+                    <div className="font-bold">{String(barcodeResult.name)}</div>
+                    <div className="mt-1 font-mono text-[11px]">
+                      کد: {String(barcodeResult.code)} | فروش: {formatIrr(barcodeResult.default_sale_price as string)} ریال
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Create Product */}
+              <form onSubmit={createProduct} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900">افزودن کالای جدید</h3>
+                <div className="grid grid-cols-2 gap-2.5 text-xs">
+                  <input
+                    required
+                    placeholder="کد کالا (SKU)"
+                    value={prodForm.code}
+                    onChange={(e) => setProdForm({ ...prodForm, code: e.target.value })}
+                    className="rounded-xl border border-slate-200 px-3 py-2"
+                  />
+                  <input
+                    required
+                    placeholder="نام کالا"
+                    value={prodForm.name}
+                    onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })}
+                    className="rounded-xl border border-slate-200 px-3 py-2"
+                  />
+                  <input
+                    dir="ltr"
+                    placeholder="قیمت فروش"
+                    value={prodForm.sale_price}
+                    onChange={(e) => setProdForm({ ...prodForm, sale_price: e.target.value })}
+                    className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
+                  />
+                  <select
+                    value={prodForm.base_unit_id}
+                    onChange={(e) => setProdForm({ ...prodForm, base_unit_id: e.target.value })}
+                    className="rounded-xl border border-slate-200 px-3 py-2"
+                  >
+                    {catalogMeta.units.map((u) => (
+                      <option key={String(u.id)} value={String(u.id)}>{String(u.name)}</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="submit" className="w-full rounded-xl bg-emerald-700 text-white py-2 text-xs font-medium cursor-pointer">
+                  ثبت کالا
+                </button>
+              </form>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+              <table className="w-full text-xs text-right">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-3">کد / بارکد</th>
+                    <th className="px-4 py-3">نام کالا</th>
+                    <th className="px-4 py-3">دسته / برند</th>
+                    <th className="px-4 py-3">قیمت خرید / فروش (ریال)</th>
+                    <th className="px-4 py-3">موجودی کل (Ledger)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 tabular-nums">
+                  {productsList.map((p) => (
+                    <tr key={String(p.id)}>
+                      <td className="px-4 py-3 font-mono text-[11px]">
+                        <div className="font-semibold text-slate-900">{String(p.code)}</div>
+                        <div className="text-slate-400">{String(p.barcode || "—")}</div>
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-900">{String(p.name)}</td>
+                      <td className="px-4 py-3 text-slate-500">
+                        {String(p.category_name || "—")} / {String(p.brand_name || "—")}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div>فروش: <strong>{formatIrr(p.sale_price as string)}</strong></div>
+                        <div className="text-[11px] text-slate-400">خرید: {formatIrr(p.purchase_price as string)}</div>
+                      </td>
+                      <td className="px-4 py-3 font-bold text-teal-700">
+                        {formatQty(p.total_on_hand_qty as string)} {String(p.unit_name)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 5. CONTACTS */}
+        {tab === "contacts" && (
+          <div className="space-y-5">
+            <form onSubmit={createContact} className="bg-white rounded-2xl border border-slate-200 p-5 grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+              <input
+                required
+                placeholder="کد شخص (مثلاً C-1099)"
+                value={contactForm.code}
+                onChange={(e) => setContactForm({ ...contactForm, code: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              />
+              <input
+                required
+                placeholder="نام نمایشی طرف‌حساب"
+                value={contactForm.display_name}
+                onChange={(e) => setContactForm({ ...contactForm, display_name: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              />
+              <select
+                value={contactForm.type}
+                onChange={(e) => setContactForm({ ...contactForm, type: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              >
+                <option value="CUSTOMER">مشتری (CUSTOMER)</option>
+                <option value="SUPPLIER">تأمین‌کننده (SUPPLIER)</option>
+                <option value="BOTH">هر دو (BOTH)</option>
+                <option value="EMPLOYEE">پرسنل (EMPLOYEE)</option>
+              </select>
+              <input
+                dir="ltr"
+                placeholder="0912..."
+                value={contactForm.mobile}
+                onChange={(e) => setContactForm({ ...contactForm, mobile: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
+              />
+              <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
+                ثبت طرف‌حساب
+              </button>
+            </form>
+
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+              <table className="w-full text-xs text-right">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-3">کد</th>
+                    <th className="px-4 py-3">نام طرف‌حساب</th>
+                    <th className="px-4 py-3">نوع / گروه</th>
+                    <th className="px-4 py-3">موبایل</th>
+                    <th className="px-4 py-3">مانده جاری (ریال)</th>
+                    <th className="px-4 py-3">نسخه Sync</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 tabular-nums">
+                  {contactsList.map((c) => (
+                    <tr key={String(c.id)}>
+                      <td className="px-4 py-3 font-mono">{String(c.code)}</td>
+                      <td className="px-4 py-3 font-semibold text-slate-900">{String(c.display_name)}</td>
+                      <td className="px-4 py-3 text-[11px]">
+                        {String(c.type)} {c.group_name ? `• ${String(c.group_name)}` : ""}
+                      </td>
+                      <td className="px-4 py-3 font-mono">{String(c.mobile || "—")}</td>
+                      <td className="px-4 py-3 font-bold">{formatIrr(c.running_balance as string)}</td>
+                      <td className="px-4 py-3 font-mono text-slate-400">v{String(c.version)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 6. COMMERCE (SALES & PURCHASING) */}
+        {tab === "commerce" && (
+          <div className="space-y-5">
+            <form onSubmit={createDraftSale} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+              <h3 className="text-sm font-bold text-slate-900">ثبت فاکتور فروش جدید (پیش‌نویس ← تایید اتمیک انبار + حسابداری)</h3>
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+                <select
+                  value={saleForm.customer_id}
+                  onChange={(e) => setSaleForm({ ...saleForm, customer_id: e.target.value })}
+                  className="rounded-xl border border-slate-200 px-3 py-2"
+                >
+                  {contactsList.map((c) => (
+                    <option key={String(c.id)} value={String(c.id)}>{String(c.display_name)}</option>
+                  ))}
+                </select>
+                <select
+                  value={saleForm.warehouse_id}
+                  onChange={(e) => setSaleForm({ ...saleForm, warehouse_id: e.target.value })}
+                  className="rounded-xl border border-slate-200 px-3 py-2"
+                >
+                  {warehousesList.map((w) => (
+                    <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
+                  ))}
+                </select>
+                <select
+                  value={saleForm.product_id}
+                  onChange={(e) => setSaleForm({ ...saleForm, product_id: e.target.value })}
+                  className="rounded-xl border border-slate-200 px-3 py-2"
+                >
+                  {productsList.map((p) => (
+                    <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
+                  ))}
+                </select>
+                <input
+                  dir="ltr"
+                  value={saleForm.quantity}
+                  onChange={(e) => setSaleForm({ ...saleForm, quantity: e.target.value })}
+                  placeholder="تعداد"
+                  className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
+                />
+                <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
+                  ایجاد پیش‌نویس فروش
+                </button>
+              </div>
+            </form>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">فاکتورهای فروش (/api/v1/sales)</h3>
+                <div className="space-y-2.5 text-xs">
+                  {salesList.map((inv) => (
+                    <div key={String(inv.id)} className="rounded-xl border border-slate-200 p-3.5 flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-bold text-slate-900">
+                          {String(inv.document_number)} — {String(inv.customer_name)}
+                        </div>
+                        <div className="text-slate-500 mt-0.5 tabular-nums">
+                          {formatIrr(inv.grand_total as string)} ریال • {String(inv.warehouse_name)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${inv.status === "CONFIRMED" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                          {String(inv.status)}
+                        </span>
+                        {inv.status === "DRAFT" && (
+                          <button
+                            type="button"
+                            onClick={() => confirmInvoice("sales", String(inv.id))}
+                            className="rounded-lg bg-emerald-600 text-white px-2.5 py-1 text-[11px] cursor-pointer"
+                          >
+                            تایید اتمیک
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">فاکتورهای خرید (/api/v1/purchases)</h3>
+                <div className="space-y-2.5 text-xs">
+                  {purchasesList.map((inv) => (
+                    <div key={String(inv.id)} className="rounded-xl border border-slate-200 p-3.5 flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-bold text-slate-900">
+                          {String(inv.document_number)} — {String(inv.supplier_name)}
+                        </div>
+                        <div className="text-slate-500 mt-0.5 tabular-nums">
+                          {formatIrr(inv.grand_total as string)} ریال • {String(inv.warehouse_name)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${inv.status === "CONFIRMED" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                          {String(inv.status)}
+                        </span>
+                        {inv.status === "DRAFT" && (
+                          <button
+                            type="button"
+                            onClick={() => confirmInvoice("purchases", String(inv.id))}
+                            className="rounded-lg bg-indigo-600 text-white px-2.5 py-1 text-[11px] cursor-pointer"
+                          >
+                            تایید و ورود انبار
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 7. TREASURY, CHEQUES & CONSIGNMENTS */}
+        {tab === "treasury" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {treasuryAccounts.map((fa) => (
+                <div key={String(fa.id)} className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-sm text-slate-900">{String(fa.name)}</div>
+                    <div className="text-xs text-slate-400 font-mono mt-0.5">{String(fa.account_type)} • {String(fa.iban || "صندوق نقدی")}</div>
+                  </div>
+                  <div className="text-lg font-bold text-emerald-700 tabular-nums">
+                    {formatIrr(fa.balance as string)} <span className="text-xs font-normal text-slate-500">ریال</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <form onSubmit={recordTreasuryTx} className="bg-white rounded-2xl border border-slate-200 p-5 grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+              <select
+                value={txForm.kind}
+                onChange={(e) => setTxForm({ ...txForm, kind: e.target.value as "receipts" | "payments" })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              >
+                <option value="receipts">دریافت وجه (RECEIPT)</option>
+                <option value="payments">پرداخت وجه (PAYMENT)</option>
+              </select>
+              <select
+                value={txForm.account_id}
+                onChange={(e) => setTxForm({ ...txForm, account_id: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              >
+                {treasuryAccounts.map((a) => (
+                  <option key={String(a.id)} value={String(a.id)}>{String(a.name)}</option>
+                ))}
+              </select>
+              <input
+                dir="ltr"
+                value={txForm.amount}
+                onChange={(e) => setTxForm({ ...txForm, amount: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
+              />
+              <input
+                value={txForm.description}
+                onChange={(e) => setTxForm({ ...txForm, description: e.target.value })}
+                className="rounded-xl border border-slate-200 px-3 py-2"
+              />
+              <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
+                ثبت تراکنش خزانه ({treasuryTxs.length})
+              </button>
+            </form>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900">مدیریت چک‌ها و رویدادها (/api/v1/cheques)</h3>
+                {chequesList.map((ch) => (
+                  <div key={String(ch.id)} className="rounded-xl border border-slate-200 p-3.5 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold">{String(ch.bank_name)} — {String(ch.cheque_number)}</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700">
+                        {String(ch.status)}
+                      </span>
+                    </div>
+                    <div className="text-slate-600 tabular-nums">
+                      مبلغ: <strong>{formatIrr(ch.amount as string)}</strong> ریال • سررسید: {String(ch.due_date)}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button type="button" onClick={() => transitionCheque(String(ch.id), "deposit")} className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] hover:bg-slate-50 cursor-pointer">واگذاری به بانک</button>
+                      <button type="button" onClick={() => transitionCheque(String(ch.id), "cash")} className="rounded-lg bg-emerald-600 text-white px-2.5 py-1 text-[11px] cursor-pointer">پاس شد (CASHED)</button>
+                      <button type="button" onClick={() => transitionCheque(String(ch.id), "bounce")} className="rounded-lg bg-rose-600 text-white px-2.5 py-1 text-[11px] cursor-pointer">برگشت خورد (BOUNCED)</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                <h3 className="text-sm font-bold text-slate-900">کالاهای امانی و تسویه (/api/v1/consignments)</h3>
+                {consignmentsList.map((cd) => (
+                  <div key={String(cd.id)} className="rounded-xl border border-slate-200 p-3.5 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold">{String(cd.document_number)} — {String(cd.contact_name)}</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-teal-50 text-teal-800">{String(cd.status)}</span>
+                    </div>
+                    <div className="text-slate-600 tabular-nums">
+                      ارزش کل: {formatIrr(cd.total_value as string)} ریال • نرخ کارمزد: {String(cd.commission_rate)}٪
+                    </div>
+                    {cd.status !== "SETTLED" && (
+                      <button
+                        type="button"
+                        onClick={() => settleConsignment(String(cd.id))}
+                        className="rounded-lg bg-teal-700 text-white px-3 py-1 text-[11px] cursor-pointer"
+                      >
+                        ثبت تسویه امانت‌گذار با محاسبه دقیق کارمزد
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 8. SUBSCRIPTION & CAFEBAZAAR */}
+        {tab === "subscription" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 text-xs">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900">وضعیت اشتراک و Entitlement سمت سرور</h3>
+                  <span className={`px-2.5 py-0.5 rounded-full font-semibold ${isExpired ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+                    {String(subCurrent?.status ?? "—")} ({String(subCurrent?.plan_code ?? "")})
+                  </span>
+                </div>
+                <div className="text-slate-500">
+                  انقضا: {formatDateFa((subCurrent?.subscription as Record<string, unknown>)?.expires_at as string)}
+                </div>
+                <div className="grid grid-cols-2 gap-2 pt-2">
+                  {Object.entries((subCurrent?.entitlements as Record<string, { enabled: boolean; limit_value: number | null }>) ?? {}).map(
+                    ([code, ent]) => (
+                      <div key={code} className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2 flex items-center justify-between">
+                        <span className="font-mono text-[11px]">{code}</span>
+                        <span className={ent.enabled ? "text-emerald-700 font-bold" : "text-slate-400"}>
+                          {ent.enabled ? (ent.limit_value ? `تا ${ent.limit_value}` : "فعال") : "قفل"}
+                        </span>
+                      </div>
+                    )
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={exportAllData}
+                  className="w-full mt-2 inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 py-2 font-medium text-slate-800 cursor-pointer"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>خروجی کامل داده‌های سازمان (همیشه آزاد حتی پس از انقضا)</span>
+                </button>
+              </div>
+
+              <form onSubmit={verifyCafeBazaar} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 text-xs">
+                <h3 className="text-sm font-bold text-slate-900">اعتبارسنجی رسمی رسید کافه‌بازار (/api/v1/subscription/market/verify)</h3>
+                <p className="text-slate-500 leading-relaxed">
+                  برای تست رسید معتبر از فرمت <code className="font-mono bg-slate-100 px-1">CBZ-VALID-XXXXX1</code> و برای تست مسدودسازی رسید جعلی از هر متن دیگر استفاده کنید. استفاده مجدد (Replay) نیز مسدود می‌شود.
+                </p>
+                <div>
+                  <label className="block text-slate-700 mb-1">شناسه محصول (SKU)</label>
+                  <select
+                    value={cbzForm.sku}
+                    onChange={(e) => setCbzForm({ ...cbzForm, sku: e.target.value })}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 font-mono"
+                  >
+                    {subPlans.map((p) => (
+                      <option key={String(p.id)} value={String(p.cafebazaar_sku)}>
+                        {String(p.name_fa)} — {String(p.cafebazaar_sku)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-700 mb-1">Purchase Token کافه‌بازار</label>
+                  <input
+                    dir="ltr"
+                    required
+                    value={cbzForm.purchase_token}
+                    onChange={(e) => setCbzForm({ ...cbzForm, purchase_token: e.target.value })}
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
+                  />
+                </div>
+                <button type="submit" className="w-full rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white py-2 font-medium cursor-pointer">
+                  تایید رسید در سرور و فعال‌سازی اشتراک
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* 9. OFFLINE ANDROID BIDIRECTIONAL SYNC ENGINE (MASTER PROMPT 04) */}
+        {tab === "sync" && (
+          <div className="space-y-5">
+            {syncStatus && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <div className="text-slate-500">ترتیب Change Log سرور</div>
+                  <div className="text-lg font-bold font-mono mt-1">#{String(syncStatus.server_head_seq)}</div>
+                  <div className="text-[10px] font-mono text-slate-400 truncate mt-1" dir="ltr">
+                    {String(syncStatus.server_head_cursor || "")}
+                  </div>
+                </div>
+                <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <div className="text-slate-500">تعارض‌های باز</div>
+                  <div className="text-lg font-bold text-amber-700 mt-1">{String(syncStatus.open_conflicts_count)}</div>
+                  <div className="text-[11px] text-slate-400 mt-1">بررسی دامنه‌محور بدون LWW</div>
+                </div>
+                <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                  <div className="text-slate-500">تازگی داده (UTC)</div>
+                  <div className="text-xs font-semibold text-emerald-700 mt-2">
+                    {formatDateTimeFa(syncStatus.server_time_utc as string)}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">وضعیت Sync مستقل از تجاری</div>
+                </div>
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col justify-between">
+                  <div className="text-slate-500">بازیابی Cursor</div>
+                  <button
+                    type="button"
+                    onClick={triggerProtectedResetCheckpoint}
+                    className="mt-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-[11px] font-medium cursor-pointer"
+                  >
+                    Reset Checkpoint (ایمن)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">آزمایشگاه زنده موتور همگام‌سازی دوطرفه (Master Prompt 04)</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  آزمایش مستقیم Outbox ← Inbox Idempotency، خرید آفلاین با تایید سرور، رقابت موجودی دو دستگاه، و Pull با Opaque Cursor + Acknowledge
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => simulateOfflinePush("CONTACT_CREATE")}
+                  className="rounded-xl bg-emerald-700 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
+                >
+                  ۱. ثبت آفلاین شخص (Client UUID)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => simulateOfflinePush("OFFLINE_PURCHASE")}
+                  className="rounded-xl bg-indigo-600 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
+                >
+                  ۲. خرید آفلاین + تایید انبار و حسابداری
+                </button>
+                <button
+                  type="button"
+                  onClick={() => simulateOfflinePush("STOCK_RACE")}
+                  className="rounded-xl bg-rose-700 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
+                >
+                  ۳. شبیه‌سازی کمبود موجودی چنددستگاهی
+                </button>
+                <button
+                  type="button"
+                  onClick={() => simulateOfflinePush("CONFLICT")}
+                  className="rounded-xl bg-amber-600 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
+                >
+                  ۴. شبیه‌سازی تعارض فیلد مرجع
+                </button>
+                <button
+                  type="button"
+                  onClick={simulateOfflinePullAndAck}
+                  className="rounded-xl bg-slate-900 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
+                >
+                  ۵. Pull (Opaque Cursor) + Acknowledge
+                </button>
+              </div>
+            </div>
+
+            {pullOutput && (
+              <div className="bg-slate-950 text-slate-100 rounded-2xl p-4 text-xs font-mono space-y-1">
+                <div className="text-emerald-400">
+                  GET /api/v1/sync/pull — next_cursor: {String(pullOutput.next_cursor)} | has_more: {String(pullOutput.has_more)}
+                </div>
+                <pre dir="ltr" className="overflow-x-auto max-h-56 text-left">
+                  {JSON.stringify(((pullOutput.changes as unknown[]) ?? []).slice(0, 6), null, 2)}
+                </pre>
+              </div>
+            )}
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+              <h3 className="text-sm font-bold text-slate-900">تعارض‌های همگام‌سازی سازمان (Domain-Based Conflict Resolver)</h3>
+              {(((syncData?.conflicts as Array<Record<string, unknown>>) ?? [])).map((c) => {
+                const allowed = (c.allowed_resolutions as string[]) ?? ["USE_SERVER"];
+                const statusVal = String(c.resolution_status || c.status || "OPEN");
+                return (
+                  <div key={String(c.id)} className="rounded-xl border border-slate-200 p-4 text-xs space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold">
+                        {String(c.entity_type)} ({String(c.conflict_type)}) — دستگاه: {String(c.device_name)} (سرور v{String(c.server_version)} ↔ محلی v{String(c.local_version)})
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusVal === "OPEN" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>
+                        {statusVal} {c.resolution ? `(${String(c.resolution)})` : ""}
+                      </span>
+                    </div>
+                    {Array.isArray(c.conflicting_fields) && c.conflicting_fields.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="text-slate-500">فیلدهای متعارض:</span>
+                        {(c.conflicting_fields as string[]).map((f) => (
+                          <span key={f} className="font-mono bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5 rounded-md">
+                            {f}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {statusVal === "OPEN" && (
+                      <div className="flex flex-wrap gap-2 justify-end pt-1">
+                        {allowed.includes("USE_SERVER") && (
+                          <button type="button" onClick={() => resolveOrgConflict(String(c.id), "USE_SERVER")} className="rounded-lg border border-slate-300 px-3 py-1 cursor-pointer">
+                            USE_SERVER
+                          </button>
+                        )}
+                        {allowed.includes("MERGE") && (
+                          <button type="button" onClick={() => resolveOrgConflict(String(c.id), "MERGE")} className="rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 px-3 py-1 cursor-pointer">
+                            MERGE
+                          </button>
+                        )}
+                        {allowed.includes("USE_LOCAL") && (
+                          <button type="button" onClick={() => resolveOrgConflict(String(c.id), "USE_LOCAL")} className="rounded-lg bg-emerald-700 text-white px-3 py-1 cursor-pointer">
+                            USE_LOCAL
+                          </button>
+                        )}
+                        {allowed.includes("RECREATE_AS_NEW") && (
+                          <button type="button" onClick={() => resolveOrgConflict(String(c.id), "RECREATE_AS_NEW")} className="rounded-lg border border-teal-300 bg-teal-50 text-teal-800 px-3 py-1 cursor-pointer">
+                            RECREATE_AS_NEW
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {syncStatus && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">تله‌متری و گزارش Sync دستگاه‌ها (sync_logs)</h3>
+                <table className="w-full text-xs text-right">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2">دستگاه</th>
+                      <th className="px-3 py-2">جهت</th>
+                      <th className="px-3 py-2">Push / Pull</th>
+                      <th className="px-3 py-2">موفق / خطا / تعارض</th>
+                      <th className="px-3 py-2">مدت (ms)</th>
+                      <th className="px-3 py-2">زمان</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 tabular-nums">
+                    {(((syncStatus.sync_logs as Array<Record<string, unknown>>) ?? [])).map((l) => (
+                      <tr key={String(l.sync_id)}>
+                        <td className="px-3 py-2 font-medium">{String(l.device_name)}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{String(l.direction)}</td>
+                        <td className="px-3 py-2 font-mono">{String(l.push_count)} / {String(l.pull_count)}</td>
+                        <td className="px-3 py-2 font-mono">
+                          {String(l.success_count)} / {String(l.failure_count)} / {String(l.conflict_count)}
+                        </td>
+                        <td className="px-3 py-2 font-mono">{String(l.duration_ms)} ms</td>
+                        <td className="px-3 py-2 text-slate-400">{formatDateTimeFa(l.started_at as string)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}

@@ -1,0 +1,641 @@
+openapi: 3.1.0
+info:
+  title: Business OS — Central REST API Specification
+  version: 1.0.0
+  description: >
+    Authoritative, non-negotiable API contract for Business OS (Android Offline Client,
+    Admin Web Panel, and Modular Monolith Backend). All JSON fields use strict snake_case,
+    all monetary/quantity/rate values are transmitted as Decimal Strings, all business dates
+    use YYYY-MM-DD, and all system timestamps use ISO 8601 UTC.
+servers:
+  - url: /api/v1
+    description: Business OS REST API v1
+security:
+  - BearerAuth: []
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    OrganizationIdHeader:
+      name: X-Organization-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+      description: Active tenant UUID. Always verified server-side against organization_members.
+    DeviceIdHeader:
+      name: X-Device-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    ClientVersionHeader:
+      name: X-Client-Version
+      in: header
+      required: false
+      schema: { type: string, example: "1.0.0" }
+    PageParam:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPageParam:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    SearchParam:
+      name: search
+      in: query
+      schema: { type: string }
+    StatusParam:
+      name: status
+      in: query
+      schema: { type: string }
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, const: true }
+        data: { type: object }
+        meta:
+          type: object
+          required: [request_id, timestamp]
+          properties:
+            request_id: { type: string, format: uuid }
+            timestamp: { type: string, format: date-time }
+    PaginatedEnvelope:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, const: true }
+        data: { type: array, items: { type: object } }
+        meta:
+          type: object
+          required: [pagination, request_id]
+          properties:
+            pagination:
+              type: object
+              required: [page, per_page, total, last_page]
+              properties:
+                page: { type: integer }
+                per_page: { type: integer, maximum: 100 }
+                total: { type: integer }
+                last_page: { type: integer }
+            request_id: { type: string, format: uuid }
+            timestamp: { type: string, format: date-time }
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, const: false }
+        error:
+          type: object
+          required: [code, message, details, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                required: [field, code, message]
+                properties:
+                  field: { type: string }
+                  code: { type: string }
+                  message: { type: string }
+            request_id: { type: string, format: uuid }
+    DecimalMoney:
+      type: string
+      pattern: "^-?[0-9]+(\\.[0-9]{1,2})?$"
+      example: "1250000.00"
+    DecimalQty:
+      type: string
+      pattern: "^-?[0-9]+(\\.[0-9]{1,4})?$"
+      example: "2.5000"
+    LoginRequest:
+      type: object
+      required: [password]
+      properties:
+        mobile: { type: string, example: "09121000001" }
+        email: { type: string, format: email }
+        password: { type: string }
+        device:
+          type: object
+          properties:
+            device_id: { type: string }
+            platform: { type: string, example: "android" }
+            app_version: { type: string, example: "1.0.0" }
+            device_name: { type: string, example: "Samsung Galaxy S24" }
+    ContactCreateRequest:
+      type: object
+      required: [code, display_name, type]
+      properties:
+        code: { type: string }
+        type: { type: string, enum: [CUSTOMER, SUPPLIER, BOTH, EMPLOYEE, OTHER] }
+        display_name: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        company_name: { type: string }
+        national_id: { type: string }
+        economic_code: { type: string }
+        mobile: { type: string }
+        phone: { type: string }
+        email: { type: string, format: email }
+        address: { type: string }
+        postal_code: { type: string }
+        group_id: { type: string, format: uuid, nullable: true }
+        credit_limit: { $ref: '#/components/schemas/DecimalMoney' }
+        opening_balance: { $ref: '#/components/schemas/DecimalMoney' }
+        notes: { type: string }
+    ProductCreateRequest:
+      type: object
+      required: [code, name, base_unit_id]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        item_type: { type: string, enum: [PRODUCT, SERVICE, RAW_MATERIAL, FINISHED_PRODUCT] }
+        category_id: { type: string, format: uuid, nullable: true }
+        brand_id: { type: string, format: uuid, nullable: true }
+        barcode: { type: string }
+        base_unit_id: { type: string, format: uuid }
+        purchase_price: { $ref: '#/components/schemas/DecimalMoney' }
+        sale_price: { $ref: '#/components/schemas/DecimalMoney' }
+        tax_rate: { $ref: '#/components/schemas/DecimalMoney' }
+        minimum_stock: { $ref: '#/components/schemas/DecimalQty' }
+        maximum_stock: { $ref: '#/components/schemas/DecimalQty' }
+        track_inventory: { type: boolean, default: true }
+        allow_negative_stock: { type: boolean, default: false }
+        attributes: { type: object }
+    JournalEntryCreateRequest:
+      type: object
+      required: [document_date, description, lines]
+      properties:
+        client_document_id: { type: string, format: uuid }
+        fiscal_year_id: { type: string, format: uuid }
+        accounting_period_id: { type: string, format: uuid }
+        document_date: { type: string, format: date }
+        description: { type: string }
+        confirm_immediately: { type: boolean, default: false }
+        lines:
+          type: array
+          minItems: 2
+          items:
+            type: object
+            required: [account_id, debit, credit]
+            properties:
+              account_id: { type: string, format: uuid }
+              contact_id: { type: string, format: uuid, nullable: true }
+              cost_center_id: { type: string, format: uuid, nullable: true }
+              description: { type: string }
+              debit: { $ref: '#/components/schemas/DecimalMoney' }
+              credit: { $ref: '#/components/schemas/DecimalMoney' }
+    InvoiceCreateRequest:
+      type: object
+      required: [warehouse_id, document_date, items]
+      properties:
+        client_document_id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        supplier_id: { type: string, format: uuid }
+        warehouse_id: { type: string, format: uuid }
+        document_date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        currency: { type: string, default: "IRR" }
+        exchange_rate: { $ref: '#/components/schemas/DecimalQty' }
+        discount_total: { $ref: '#/components/schemas/DecimalMoney' }
+        tax_total: { $ref: '#/components/schemas/DecimalMoney' }
+        shipping_cost: { $ref: '#/components/schemas/DecimalMoney' }
+        other_costs: { $ref: '#/components/schemas/DecimalMoney' }
+        notes: { type: string }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [product_id, quantity, unit_price]
+            properties:
+              product_id: { type: string, format: uuid }
+              quantity: { $ref: '#/components/schemas/DecimalQty' }
+              unit_price: { $ref: '#/components/schemas/DecimalMoney' }
+              description: { type: string }
+    MarketVerifyRequest:
+      type: object
+      required: [package_name, sku, purchase_token]
+      properties:
+        package_name: { type: string, example: "ir.businessos.app" }
+        sku: { type: string, example: "bos_pro_monthly" }
+        purchase_token: { type: string }
+paths:
+  /auth/register:
+    post:
+      summary: Register a new Business OS user account
+      security: []
+      responses: { '201': { description: Registered }, '422': { description: Validation error } }
+  /auth/login:
+    post:
+      summary: Authenticate via mobile/email and issue Bearer access + rotating refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200': { description: Authenticated with Bearer token }
+        '401': { description: Invalid credentials }
+  /auth/refresh:
+    post:
+      summary: Rotate refresh token with reuse attack protection
+      responses: { '200': { description: Rotated tokens }, '401': { description: Reuse or expired } }
+  /auth/logout:
+    post: { summary: Revoke current session, responses: { '200': { description: Logged out } } }
+  /auth/logout-all:
+    post: { summary: Revoke all active sessions of current user, responses: { '200': { description: Logged out all } } }
+  /auth/me:
+    get: { summary: Current user profile, verified organizations, RBAC permissions & entitlements, responses: { '200': { description: Profile } } }
+    patch: { summary: Update profile or active organization context, responses: { '200': { description: Updated } } }
+  /auth/sessions:
+    get: { summary: List active and past sessions, responses: { '200': { description: Sessions } } }
+  /auth/sessions/{id}:
+    delete: { summary: Revoke specific session, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Revoked } } }
+  /devices/register:
+    post: { summary: Register stable Android device_id, responses: { '201': { description: Registered } } }
+  /devices:
+    get: { summary: List organization devices, responses: { '200': { description: Devices list } } }
+  /devices/{id}/revoke:
+    post: { summary: Revoke compromised device, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Revoked } } }
+  /organizations:
+    get: { summary: List organizations accessible by authenticated user, responses: { '200': { description: Organizations } } }
+    post: { summary: Provision new organization with default chart of accounts & warehouse, responses: { '201': { description: Created } } }
+  /organizations/{id}:
+    get: { summary: Get verified organization details, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Organization } } }
+    patch: { summary: Update organization profile, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+  /organizations/{id}/settings:
+    get: { summary: Get organization accounting/inventory/currency settings, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Settings } } }
+    patch: { summary: Update organization policies, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+  /organizations/{id}/members:
+    get: { summary: List organization members, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Members } } }
+    post: { summary: Add member to organization, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Added } } }
+  /organizations/{id}/fiscal-years:
+    get: { summary: List organization fiscal years and accounting periods, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Fiscal years } } }
+    post: { summary: Create fiscal year, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Created } } }
+  /roles:
+    get: { summary: List roles, responses: { '200': { description: Roles } } }
+    post: { summary: Create custom org role, responses: { '201': { description: Created } } }
+  /permissions:
+    get: { summary: List all granular system permissions, responses: { '200': { description: Permissions } } }
+  /users:
+    get: { summary: List organization users, responses: { '200': { description: Users } } }
+  /contacts:
+    get:
+      summary: Paginated list of contacts with running balance
+      parameters:
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - $ref: '#/components/parameters/SearchParam'
+      responses: { '200': { description: Contacts list } }
+    post:
+      summary: Create contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactCreateRequest' }
+      responses: { '201': { description: Created } }
+  /contacts/{id}/balance:
+    get: { summary: Compute contact balance from transactions, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Balance } } }
+  /contacts/{id}/statement:
+    get: { summary: Detailed contact account statement, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Statement } } }
+  /products:
+    get: { summary: Paginated catalog products with Stock Ledger on-hand totals, responses: { '200': { description: Products } } }
+    post:
+      summary: Create product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductCreateRequest' }
+      responses: { '201': { description: Created } }
+  /products/barcode/{barcode}:
+    get: { summary: Fast barcode lookup for Android scanner, parameters: [{ name: barcode, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Product } } }
+  /warehouses:
+    get: { summary: List warehouses, responses: { '200': { description: Warehouses } } }
+    post: { summary: Create warehouse, responses: { '201': { description: Created } } }
+  /inventory/stock:
+    get: { summary: Live Stock Ledger balances and valuation, responses: { '200': { description: Stock valuation } } }
+  /inventory/movements:
+    get: { summary: Paginated Stock Ledger card movements, responses: { '200': { description: Movements } } }
+  /inventory/transfers:
+    get: { summary: List warehouse transfers, responses: { '200': { description: Transfers } } }
+    post: { summary: Execute atomic source-out and destination-in warehouse transfer, responses: { '201': { description: Transferred } } }
+  /inventory/counts:
+    get: { summary: List stock counts, responses: { '200': { description: Counts } } }
+    post: { summary: Submit & confirm stock count generating variance adjustment document, responses: { '201': { description: Count approved } } }
+  /purchases:
+    get: { summary: Paginated purchase invoices, responses: { '200': { description: Purchases } } }
+    post:
+      summary: Create draft purchase invoice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceCreateRequest' } } } }
+      responses: { '201': { description: Draft created } }
+  /purchases/{id}/confirm:
+    post: { summary: Atomically confirm purchase + Stock Receipt + Double-Entry Accounting Voucher, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Confirmed } } }
+  /sales:
+    get: { summary: Paginated sales invoices, responses: { '200': { description: Sales } } }
+    post:
+      summary: Create draft sales invoice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceCreateRequest' } } } }
+      responses: { '201': { description: Draft created } }
+  /sales/{id}/confirm:
+    post: { summary: Atomically confirm sale + Stock Issue + COGS & Revenue Journal Voucher, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Confirmed } } }
+  /consignments:
+    get: { summary: List consignment documents separated from owned inventory, responses: { '200': { description: Consignments } } }
+    post: { summary: Create consignment document, responses: { '201': { description: Created } } }
+  /consignments/{id}/settlements:
+    post: { summary: Calculate commission and settle consignor payable, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Settled } } }
+  /treasury/accounts:
+    get: { summary: List bank accounts and cashboxes, responses: { '200': { description: Treasury accounts } } }
+    post: { summary: Create treasury account, responses: { '201': { description: Created } } }
+  /treasury/receipts:
+    post: { summary: Record treasury cash/bank receipt, responses: { '201': { description: Receipt recorded } } }
+  /treasury/payments:
+    post: { summary: Record treasury payment, responses: { '201': { description: Payment recorded } } }
+  /treasury/transfers:
+    post: { summary: Transfer funds atomically between treasury accounts, responses: { '201': { description: Transfer recorded } } }
+  /cheques:
+    get: { summary: List receivable and payable cheques with event history, responses: { '200': { description: Cheques } } }
+    post: { summary: Register cheque, responses: { '201': { description: Registered } } }
+  /cheques/{id}/deposit:
+    post: { summary: Record DEPOSITED cheque event, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+  /cheques/{id}/cash:
+    post: { summary: Record CASHED cheque event, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+  /cheques/{id}/bounce:
+    post: { summary: Record BOUNCED cheque event, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+  /accounting/accounts:
+    get: { summary: Chart of accounts, responses: { '200': { description: Accounts } } }
+    post: { summary: Create postable account, responses: { '201': { description: Created } } }
+  /accounting/journal-entries:
+    get: { summary: Paginated journal entries with double-entry lines, responses: { '200': { description: Journal entries } } }
+    post:
+      summary: Create draft or confirmed double-entry journal voucher
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/JournalEntryCreateRequest' } } } }
+      responses: { '201': { description: Created }, '409': { description: Unbalanced or closed period } }
+  /accounting/journal-entries/{id}/confirm:
+    post: { summary: Permanently confirm balanced draft voucher, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Confirmed } } }
+  /accounting/journal-entries/{id}/reverse:
+    post: { summary: Issue linked reversal voucher for immutable confirmed entry, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Reversed } } }
+  /accounting/trial-balance:
+    get: { summary: Ledger-reconstructed Trial Balance, responses: { '200': { description: Trial balance } } }
+  /accounting/profit-loss:
+    get: { summary: Ledger-reconstructed Profit & Loss statement, responses: { '200': { description: Profit and Loss } } }
+  /accounting/balance-sheet:
+    get: { summary: Ledger-reconstructed Balance Sheet, responses: { '200': { description: Balance sheet } } }
+  /reports/dashboard:
+    get: { summary: Organization executive KPIs and financial snapshot, responses: { '200': { description: Dashboard } } }
+  /export:
+    get: { summary: Always-accessible full tenant data export (never blocked on subscription expiry), responses: { '200': { description: Export JSON } } }
+  /subscription/plans:
+    get: { summary: List active plans and feature limits, responses: { '200': { description: Plans } } }
+  /subscription/current:
+    get: { summary: Current organization subscription and server-side entitlements, responses: { '200': { description: Current subscription } } }
+  /subscription/market/verify:
+    post:
+      summary: Verify CafeBazaar purchase receipt server-side with mandatory Idempotency-Key
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MarketVerifyRequest' } } } }
+      responses: { '200': { description: Verified }, '409': { description: Receipt replayed } }
+  /subscription/market/restore:
+    post: { summary: Restore valid CafeBazaar purchases for tenant, responses: { '200': { description: Restored } } }
+  /files:
+    post: { summary: Request validated presigned S3 upload for attachment, responses: { '201': { description: Upload initialized } } }
+  /files/{id}/complete-upload:
+    post: { summary: Mark S3 upload completed, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Completed } } }
+  /sync/push:
+    post: { summary: Push offline Android mutation batch with optimistic concurrency & conflict detection, responses: { '200': { description: Processed batch } } }
+  /sync/pull:
+    get: { summary: Pull delta records since checkpoint, responses: { '200': { description: Delta payload } } }
+  /sync/status:
+    get: { summary: Organization sync status, head cursor, device lag & sync_logs telemetry, responses: { '200': { description: Sync status } } }
+  /sync/acknowledge:
+    post: { summary: Acknowledge opaque cursor after Android Room transaction commits, responses: { '200': { description: Acknowledged } } }
+  /sync/checkpoints:
+    get: { summary: List device checkpoints, responses: { '200': { description: Checkpoints } } }
+  /sync/reset-checkpoint:
+    post: { summary: Protected non-destructive checkpoint reset, responses: { '200': { description: Reset } } }
+  /sync/conflicts/{id}/resolve:
+    post: { summary: Domain-restricted conflict resolution (USE_SERVER / USE_LOCAL / MERGE / RECREATE_AS_NEW), parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Resolved }, '409': { description: Resolution forbidden for entity } } }
+  /personal-finance/dashboard:
+    get: { summary: Dedicated Personal Finance Dashboard (requires personal_finance.view), responses: { '200': { description: Personal finance summary }, '403': { description: Permission denied } } }
+  /personal-finance/withdrawals:
+    post: { summary: Record Owner Withdrawal (DR Owner Drawings 3201 / CR Cash or Bank; never impacts business P&L), responses: { '201': { description: Withdrawal posted } } }
+  /personal-finance/contributions:
+    post: { summary: Record Owner Contribution to business, responses: { '201': { description: Contribution posted } } }
+  /personal-finance/transactions:
+    get: { summary: List personal ledger transactions, responses: { '200': { description: Transactions } } }
+    post: { summary: Create personal expense/income optionally linked to an OwnerWithdrawal, responses: { '201': { description: Created } } }
+  /personal-finance/recurring:
+    get: { summary: List recurring personal obligations, responses: { '200': { description: Obligations } } }
+    post: { summary: Define recurring obligation without auto-posting payment, responses: { '201': { description: Created } } }
+  /personal-finance/recurring/{id}/pay:
+    post: { summary: Record idempotent payment of a recurring obligation, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Paid } } }
+  /accounting-categories:
+    get: { summary: List expense/income categories with automatic GL account mappings, responses: { '200': { description: Categories } } }
+    post: { summary: Create accounting category with optional mapping, responses: { '201': { description: Created } } }
+  /quick-transactions:
+    get: { summary: List rapid expense/income transactions, responses: { '200': { description: Quick transactions } } }
+    post: { summary: Post quick expense or income with automatic category-to-GL double-entry journal, responses: { '201': { description: Posted }, '422': { description: Missing category account mapping } } }
+  /variants:
+    get: { summary: List product variants with independent Stock Ledger balances and parent projection, responses: { '200': { description: Variants } } }
+    post: { summary: Create product variant, responses: { '201': { description: Created } } }
+  /opening-stock:
+    post: { summary: Post opening stock document for product or variant with opening accounting voucher, responses: { '201': { description: Opening stock posted } } }
+  /replenishment/thresholds:
+    get: { summary: List warehouse reorder thresholds, responses: { '200': { description: Thresholds } } }
+    post: { summary: Configure product/variant warehouse reorder threshold, responses: { '201': { description: Saved } } }
+  /replenishment/suggestions:
+    get: { summary: Compute explainable smart purchase recommendations factoring in incoming POs, responses: { '200': { description: Suggestions } } }
+  /replenishment/suggestions/{id}/convert-po:
+    post: { summary: Convert accepted purchase suggestion into a single non-duplicate Purchase Order, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Converted to PO } } }
+  /purchase-orders:
+    get: { summary: List purchase orders with items, responses: { '200': { description: Purchase orders } } }
+    post: { summary: Create purchase order, responses: { '201': { description: Created } } }
+  /quotations:
+    get: { summary: List quotations/proforma invoices, responses: { '200': { description: Quotations } } }
+    post: { summary: Create quotation (zero accounting/stock effect), responses: { '201': { description: Created } } }
+  /quotations/{id}/convert:
+    post: { summary: Convert quotation to draft sales invoice, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Converted } } }
+  /crm/customers:
+    get: { summary: Customer CRM profiles with segmentation, receivables & immutable loyalty balance, responses: { '200': { description: CRM profiles } } }
+  /crm/loyalty/transactions:
+    post: { summary: Record immutable loyalty points earn/redeem/adjust transaction, responses: { '201': { description: Recorded } } }
+  /employees:
+    get: { summary: List organization employees & role assignments (requires employees.manage), responses: { '200': { description: Employees } } }
+    post: { summary: Create employee with scoped RBAC role, responses: { '201': { description: Created } } }
+  /cheques/dashboard:
+    get: { summary: Cheque dashboard summary cards (due this week, in collection, returned, receivables/payables), responses: { '200': { description: Dashboard } } }
+  /cheques/analytics:
+    get: { summary: Daily bar chart series of received vs issued cheques for selected month, responses: { '200': { description: Analytics } } }
+  /accounting/journal-book:
+    get: { summary: Posted Journal Book with total debit and credit balance verification, responses: { '200': { description: Journal book } } }
+  /accounting/journal-book/export:
+    get: { summary: Download real XLSX Excel workbook of the posted Journal Book, responses: { '200': { description: Binary XLSX workbook } } }
+  /accounting/subsidiary-ledger:
+    get: { summary: Subsidiary and detail contact ledgers, responses: { '200': { description: Subsidiary ledger } } }
+  /documents/pdf:
+    get: { summary: Printable Persian RTL HTML/PDF template for sales invoices and quotations, responses: { '200': { description: HTML printable PDF } } }
+  /dashboard/overview:
+    get: { summary: Authoritative financial summary cards, operational alerts & permission visibility flags, responses: { '200': { description: Dashboard overview } } }
+  /dashboard/charts/revenue:
+    get: { summary: Daily recognized business revenue (or cash received) time series excluding AR settlement inflation, responses: { '200': { description: Daily revenue series } } }
+  /dashboard/charts/sales:
+    get: { summary: Daily confirmed sales performance (gross, discounts, returns, net, invoice count), responses: { '200': { description: Daily sales series } } }
+  /dashboard/charts/expenses:
+    get: { summary: Daily business operating expenses excluding personal finance (with optional authorized personal series), responses: { '200': { description: Daily expense series } } }
+  /dashboard/charts/drilldown:
+    get: { summary: Underlying confirmed documents for any clicked day in revenue/sales/expense charts, responses: { '200': { description: Drilldown records } } }
+  /access/invitations:
+    get: { summary: List organization user invitations, responses: { '200': { description: Invitations } } }
+    post: { summary: Create single-use expiring user invitation with role, branch & warehouse scope, responses: { '201': { description: Created } } }
+  /access/invitations/accept:
+    post: { summary: Accept single-use invitation token and activate organization membership, responses: { '200': { description: Accepted } } }
+  /access/invitations/{id}/revoke:
+    post: { summary: Revoke pending invitation, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Revoked } } }
+  /access/members:
+    get: { summary: List organization members, roles, branch/warehouse scopes & active session counts, responses: { '200': { description: Members } } }
+  /access/members/{id}:
+    patch: { summary: Update member role, branch/warehouse scope, or suspend/reactivate (revoking sessions on suspend), parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Updated } } }
+    delete: { summary: Remove organization membership while preserving global user account, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Removed } } }
+  /fiscal/accounts:
+    get: { summary: List hierarchical Chart of Accounts with live balances & closure history, responses: { '200': { description: Accounts } } }
+    post: { summary: Create hierarchical ledger account, responses: { '201': { description: Created } } }
+  /fiscal/accounts/{id}/closure-preview:
+    get: { summary: Evaluate account balance and blockers before controlled closure, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Preview } } }
+  /fiscal/accounts/{id}/close:
+    post: { summary: Controlled account closure with mandatory balance resolution/transfer preserving history, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Closed }, '409': { description: Non-zero balance requires transfer } } }
+  /fiscal/opening-balances:
+    post: { summary: Idempotent opening balance posting via official balanced Opening Journal, responses: { '201': { description: Posted } } }
+  /fiscal/years:
+    get: { summary: List fiscal years, periods & closing records, responses: { '200': { description: Fiscal years } } }
+    post: { summary: Create fiscal year with quarterly accounting periods, responses: { '201': { description: Created } } }
+  /fiscal/years/{id}/closing-checklist:
+    get: { summary: Run pre-closing validation checklist (PASSED/WARNING/FAILED/NOT_APPLICABLE), parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Checklist } } }
+  /fiscal/years/{id}/closing-preview:
+    get: { summary: Preview nominal closing balances, Net Profit/Loss & closing journal lines, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Closing preview } } }
+  /fiscal/years/{id}/close:
+    post: { summary: Atomically post closing journal to Retained Earnings, snapshot carry-forwards & lock fiscal year, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Closed } } }
+  /fiscal/years/{id}/prepare-next:
+    post: { summary: Create & open next fiscal year carrying forward ONLY permanent Asset/Liability/Equity balances, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Next year opened } } }
+  /fiscal/years/{id}/reopen:
+    post: { summary: Authorized controlled reopening reversing closing journal with full audit trail, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Reopened } } }
+  /fiscal/comparison:
+    get: { summary: Compare revenue, expense, profit, assets, liabilities & equity across fiscal years, responses: { '200': { description: Comparison } } }
+  /public/app-config:
+    get: { summary: Unauthenticated SaaS & Android bootstrap configuration (OTP status, min version, stats), security: [], responses: { '200': { description: App config } } }
+  /public/plans:
+    get: { summary: Public SaaS pricing plans and feature limits, security: [], responses: { '200': { description: Pricing plans } } }
+  /public/academy:
+    get: { summary: Paginated published academy tutorials filterable by category and search, security: [], responses: { '200': { description: Tutorials list } } }
+  /public/academy/{slug}:
+    get: { summary: Dynamic academy tutorial detail with XSS-sanitized rich HTML and related articles, security: [], parameters: [{ name: slug, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Tutorial detail } } }
+  /public/contact:
+    post: { summary: Submit public SaaS Contact Us inquiry, security: [], responses: { '201': { description: Inquiry submitted } } }
+  /platform/academy:
+    get: { summary: List all academy tutorials for Platform Admin CMS, responses: { '200': { description: Articles } } }
+    post: { summary: Create academy tutorial with XSS-sanitized rich HTML content, responses: { '201': { description: Created } } }
+    patch: { summary: Update academy tutorial, responses: { '200': { description: Updated } } }
+    delete: { summary: Delete academy tutorial, responses: { '200': { description: Deleted } } }
+  /platform/sms:
+    get: { summary: Get SMS.ir and Kavenegar gateway settings (masked API keys) & delivery logs, responses: { '200': { description: SMS config } } }
+    patch: { summary: Update SMS.ir or Kavenegar credentials, sender line, OTP templates & active default, responses: { '200': { description: Updated } } }
+    post: { summary: Dispatch test SMS through SMS.ir or Kavenegar, responses: { '200': { description: Dispatched } } }
+  /platform/inquiries:
+    get: { summary: List Contact Us inquiries for Platform Admin, responses: { '200': { description: Inquiries } } }
+    patch: { summary: Update inquiry status, responses: { '200': { description: Updated } } }
+  /sales/{id}/return:
+    post: { summary: Item-level partial or full sales invoice return with cumulative remaining qty guard, Stock Ledger IN & balanced return journal, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: '#/components/parameters/IdempotencyKeyHeader' }], responses: { '201': { description: Sales return created }, '422': { description: Qty exceeds remaining returnable } } }
+  /purchases/{id}/return:
+    post: { summary: Item-level partial or full purchase invoice return with Stock Ledger OUT & DR AP / CR Inventory journal, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: '#/components/parameters/IdempotencyKeyHeader' }], responses: { '201': { description: Purchase return created }, '409': { description: Insufficient stock to return }, '422': { description: Qty exceeds remaining returnable } } }
+  /consignments/balances:
+    get: { summary: Ownership-separated Consignment Ledger balances (third_party_held_by_us vs owned_by_us_at_agents), responses: { '200': { description: Consignment balances } } }
+  /accounting/policy:
+    get: { summary: Get organization tax & invoice policy (default_tax_rate, is_tax_inclusive, invoice_prefix, low_stock_alert_enabled), responses: { '200': { description: Accounting policy } } }
+    put: { summary: Update organization tax & invoice policy (non-retroactive to past invoices, audited), responses: { '200': { description: Updated } } }
+  /accounting/cost-centers:
+    get: { summary: List organization cost centers, responses: { '200': { description: Cost centers } } }
+    post: { summary: Create cost center (unique code per org), responses: { '201': { description: Created } } }
+  /accounting/cost-centers/{id}/profit-loss:
+    get: { summary: Cost-center scoped Profit & Loss report from posted ledger lines, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Cost center P&L } } }
+  /accounting/periods/lock:
+    post: { summary: Lock accounting period up to locked_until date (distinct from Fiscal Year Closing), responses: { '200': { description: Period locked } } }
+  /accounting/periods/{id}/unlock:
+    post: { summary: Controlled authorized unlock of a locked period with mandatory reason & security audit log, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Period unlocked } } }
+  /personal/transfers:
+    post: { summary: Unified owner transfer (Business->Personal withdrawal, Personal->Business contribution, Personal->Personal internal transfer) with source balance guard & idempotency, parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }], responses: { '201': { description: Transfer recorded }, '403': { description: Personal finance permission denied }, '409': { description: Insufficient source balance } } }
+  /inventory/transfers/{id}/dispatch:
+    post: { summary: Dispatch multi-item warehouse transfer from source warehouse into IN_TRANSIT without duplicating inventory, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Dispatched IN_TRANSIT } } }
+  /inventory/transfers/{id}/receive:
+    post: { summary: Destination operator independent partial receipt & per-item discrepancy reporting (accepted_qty, missing_qty, damaged_qty); only accepted_qty enters destination stock, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Received or discrepancy reported } } }
+  /inventory/transfers/{id}/complete:
+    post: { summary: Finalize received/reconciled warehouse transfer, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Completed } } }
+  /inventory/exports/stock:
+    get: { summary: Download filtered current warehouse inventory as XLSX workbook, responses: { '200': { description: Binary XLSX } } }
+  /inventory/exports/movements:
+    get: { summary: Download filtered warehouse transaction history (with Jalali dates) as XLSX workbook, responses: { '200': { description: Binary XLSX } } }
+  /suppliers/{id}/profile:
+    get: { summary: Supplier account profile with purchase invoices, landed receipts, settlements & live ledger balance, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Supplier profile } } }
+  /suppliers/{id}/settlements:
+    post: { summary: Record supplier debt settlement generating Treasury Payment + balanced DR AP / CR Cash-Bank journal, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: '#/components/parameters/IdempotencyKeyHeader' }], responses: { '201': { description: Settled } } }
+  /treasury/accounts/{id}/transactions:
+    get: { summary: Treasury account opening balance, current balance & filtered transaction history, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Treasury account history } } }
+  /settings/operating-mode:
+    get: { summary: Get current operating mode (CLOUD_SYNC | OFFLINE_ONLY) and agreement metadata, responses: { '200': { description: Operating mode } } }
+    post: { summary: Switch operating mode (OFFLINE_ONLY requires explicit agreement_accepted & agreement_version; stops background sync without deleting cloud data), responses: { '200': { description: Updated } } }
+  /sync/cloud-migration/start:
+    post: { summary: Begin controlled resumable cloud reactivation migration from OFFLINE_ONLY, responses: { '201': { description: Migration session started } } }
+  /sync/cloud-migration/{session_id}/upload-batch:
+    post: { summary: Upload idempotent migration batch during cloud reactivation, parameters: [{ name: session_id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Batch processed } } }
+  /sync/cloud-migration/{session_id}/complete:
+    post: { summary: Complete migration and re-enable standard bidirectional CLOUD_SYNC, parameters: [{ name: session_id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Cloud sync enabled } } }
+  /subscription/gateways:
+    get: { summary: List active online payment gateways (Zarinpal, Zibal, Balleh Pay, Saman), responses: { '200': { description: Active gateways } } }
+  /subscription/upgrade:
+    post: { summary: Create plan upgrade payment order and return gateway checkout URL + payment reference, responses: { '201': { description: Checkout order created } } }
+  /subscription/orders/{reference}:
+    get: { summary: Verify authoritative order status & signed versioned entitlement snapshot after Android App Link return, parameters: [{ name: reference, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Order and signed entitlements } } }
+  /payments/callback/{gateway}:
+    get: { summary: Server-side gateway callback verification (Zarinpal/Zibal/Balleh Pay/Saman) with duplicate-callback protection & App Link redirect, security: [], parameters: [{ name: gateway, in: path, required: true, schema: { type: string, enum: [zarinpal, zibal, balleh_pay, saman] } }], responses: { '200': { description: Verified JSON }, '302': { description: Redirect to /payments/result/{reference} } } }
+  /platform/payment-gateways:
+    get: { summary: Platform Admin view of all 4 payment gateway adapters (masked secrets, priority) & recent orders, responses: { '200': { description: Gateways } } }
+    patch: { summary: Platform Admin update gateway credentials, priority, active/default flags & sandbox mode, responses: { '200': { description: Updated } } }
+  /suppliers/{id}/account:
+    get: { summary: Supplier account summary, invoices, receipts & live payable balance, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Supplier account } } }
+  /suppliers/{id}/transactions:
+    get: { summary: Filterable supplier ledger transactions, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Transactions } } }
+  /inventory/transfers/{id}/submit:
+    post: { summary: Transition multi-item transfer DRAFT -> SUBMITTED without deducting stock yet, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Submitted } } }
+  /inventory/exports/transactions:
+    get: { summary: Download filtered warehouse inventory transaction history as XLSX workbook, responses: { '200': { description: Binary XLSX } } }
+  /sync/initial-migration:
+    post: { summary: Start resumable initial local-to-cloud migration (optionally with first dataset batch), responses: { '201': { description: Migration started } } }
+  /sync/initial-migration/{id}:
+    get: { summary: Inspect resumable initial migration session status & counters, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Migration session } } }
+  /sync/initial-migration/{id}/resume:
+    post: { summary: Upload next idempotent batch for an in-progress initial migration, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Batch applied } } }
+  /sync/initial-migration/{id}/confirm:
+    post: { summary: Finalize verified initial migration and enable standard CLOUD_SYNC, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Cloud sync enabled } } }
+  /subscriptions/current:
+    get: { summary: Current organization subscription and signed entitlements (plural alias), responses: { '200': { description: Subscription } } }
+  /subscriptions/entitlements:
+    get: { summary: Signed versioned entitlement snapshot (subscription_id, plan_id, plan_name, status, activated_at, expires_at, entitlement_version, enabled_features, feature_limits, server_time, signature), responses: { '200': { description: Entitlements } } }
+  /subscriptions/entitlements/version:
+    get: { summary: Lightweight pull-fallback entitlement version check for Android sync, responses: { '200': { description: Version } } }
+  /subscriptions/upgrade:
+    post: { summary: Initiate subscription plan upgrade order through priority-ordered active gateway, responses: { '201': { description: Upgrade order } } }
+  /subscriptions/payments/{id}:
+    get: { summary: Query authoritative payment transaction or upgrade order by UUID or opaque payment reference, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Payment & entitlements } } }

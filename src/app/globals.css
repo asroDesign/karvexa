@@ -1,0 +1,316 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ==========================================================================
+   MASTER PROMPT 06 — ASROTRAVEL TYPOGRAPHY STACK & DESIGN TOKENS
+   Discovered from live AsroTravel CSS (panel.asrotravel.com/dist/frontend/css/rtl.css):
+     Primary: Yekan Bakh ("bakh") — weights 100, 300, 400, 500, 700
+     Secondary: IRANSansWeb
+     Lawful Open-Source Fallback (SIL OFL 1.1): Vazirmatn via next/font/google
+   Licensed Yekan Bakh WOFF2 files placed in /public/fonts/yekan-bakh/ load automatically.
+   ========================================================================== */
+
+@theme inline {
+  --font-sans: "Yekan Bakh", "bakh", "IRANSansWeb", var(--font-vazirmatn), "Vazirmatn", system-ui, -apple-system, sans-serif;
+}
+
+:root {
+  /* Core Palette (Inspired by modern fintech glass + AsroTravel #863bff accent) */
+  --bos-primary: #6d28d9;
+  --bos-primary-soft: rgba(109, 40, 217, 0.12);
+  --bos-secondary: #0f766e;
+  --bos-accent: #863bff;
+
+  /* Light Glass Surface Tokens */
+  --bos-bg-base: #eef2ff;
+  --bos-bg-mesh:
+    radial-gradient(at 85% 8%, rgba(134, 59, 255, 0.14) 0px, transparent 48%),
+    radial-gradient(at 10% 15%, rgba(14, 165, 233, 0.14) 0px, transparent 45%),
+    radial-gradient(at 50% 92%, rgba(16, 185, 129, 0.11) 0px, transparent 52%),
+    linear-gradient(160deg, #f8fafc 0%, #eef2ff 50%, #f0fdfa 100%);
+
+  --glass-primary-bg: rgba(255, 255, 255, 0.76);
+  --glass-secondary-bg: rgba(255, 255, 255, 0.58);
+  --glass-nav-bg: rgba(255, 255, 255, 0.80);
+  --glass-modal-bg: rgba(255, 255, 255, 0.90);
+  --glass-input-bg: rgba(255, 255, 255, 0.72);
+  --glass-data-bg: rgba(255, 255, 255, 0.88);
+
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-border-subtle: rgba(148, 163, 184, 0.28);
+  --glass-shadow: 0 12px 32px -12px rgba(15, 23, 42, 0.12), 0 1px 2px rgba(15, 23, 42, 0.05);
+  --glass-shadow-lg: 0 24px 60px -15px rgba(30, 27, 75, 0.18);
+
+  --bos-text: #0f172a;
+  --bos-text-muted: #475569;
+
+  /* Semantic Status Colors */
+  --bos-success: #059669;
+  --bos-warning: #d97706;
+  --bos-error: #e11d48;
+  --bos-info: #0284c7;
+
+  /* Radii & Blur */
+  --bos-blur-md: 16px;
+  --bos-blur-lg: 22px;
+  --bos-radius-card: 1.25rem;
+  --bos-radius-input: 0.875rem;
+  --bos-duration-fast: 160ms;
+  --bos-duration-base: 240ms;
+}
+
+.dark {
+  --bos-primary: #a78bfa;
+  --bos-primary-soft: rgba(167, 139, 250, 0.16);
+  --bos-secondary: #2dd4bf;
+  --bos-accent: #9f67ff;
+
+  --bos-bg-base: #070b14;
+  --bos-bg-mesh:
+    radial-gradient(at 88% 10%, rgba(134, 59, 255, 0.22) 0px, transparent 46%),
+    radial-gradient(at 12% 20%, rgba(14, 165, 233, 0.16) 0px, transparent 44%),
+    radial-gradient(at 55% 95%, rgba(16, 185, 129, 0.14) 0px, transparent 50%),
+    linear-gradient(160deg, #050811 0%, #0b1120 55%, #09131c 100%);
+
+  --glass-primary-bg: rgba(15, 23, 42, 0.72);
+  --glass-secondary-bg: rgba(15, 23, 42, 0.56);
+  --glass-nav-bg: rgba(9, 14, 28, 0.82);
+  --glass-modal-bg: rgba(15, 23, 42, 0.92);
+  --glass-input-bg: rgba(30, 41, 59, 0.65);
+  --glass-data-bg: rgba(15, 23, 42, 0.86);
+
+  --glass-border: rgba(148, 163, 184, 0.20);
+  --glass-border-subtle: rgba(148, 163, 184, 0.16);
+  --glass-shadow: 0 16px 40px -14px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --glass-shadow-lg: 0 28px 64px -16px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+
+  --bos-text: #f1f5f9;
+  --bos-text-muted: #94a3b8;
+}
+
+/* Global Glass Canvas */
+.bos-canvas {
+  background-color: var(--bos-bg-base);
+  background-image: var(--bos-bg-mesh);
+  background-attachment: fixed;
+  color: var(--bos-text);
+}
+
+/* 6 Named Glass Surface Variants (Master Prompt 06 §2.4) */
+.glass-primary {
+  background: var(--glass-primary-bg);
+  backdrop-filter: blur(var(--bos-blur-md));
+  -webkit-backdrop-filter: blur(var(--bos-blur-md));
+  border: 1px solid var(--glass-border-subtle);
+  box-shadow: var(--glass-shadow);
+  border-radius: var(--bos-radius-card);
+  transition: transform var(--bos-duration-fast) ease, box-shadow var(--bos-duration-fast) ease, border-color var(--bos-duration-fast) ease;
+}
+
+.glass-secondary {
+  background: var(--glass-secondary-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border-subtle);
+  box-shadow: var(--glass-shadow);
+  border-radius: var(--bos-radius-card);
+}
+
+.glass-nav {
+  background: var(--glass-nav-bg);
+  backdrop-filter: blur(var(--bos-blur-lg));
+  -webkit-backdrop-filter: blur(var(--bos-blur-lg));
+  border-bottom: 1px solid var(--glass-border-subtle);
+}
+
+.glass-modal {
+  background: var(--glass-modal-bg);
+  backdrop-filter: blur(var(--bos-blur-lg));
+  -webkit-backdrop-filter: blur(var(--bos-blur-lg));
+  border: 1px solid var(--glass-border-subtle);
+  box-shadow: var(--glass-shadow-lg);
+  border-radius: 1.5rem;
+}
+
+.glass-input {
+  background: var(--glass-input-bg);
+  border: 1px solid var(--glass-border-subtle);
+  border-radius: var(--bos-radius-input);
+  color: var(--bos-text);
+  transition: border-color var(--bos-duration-fast) ease, box-shadow var(--bos-duration-fast) ease;
+}
+
+.glass-input:focus {
+  outline: none;
+  border-color: var(--bos-accent);
+  box-shadow: 0 0 0 3px var(--bos-primary-soft);
+}
+
+/* High-readability surface for dense accounting tables & ledgers (§2.4) */
+.glass-data {
+  background: var(--glass-data-bg);
+  border: 1px solid var(--glass-border-subtle);
+  box-shadow: var(--glass-shadow);
+  border-radius: var(--bos-radius-card);
+}
+
+/* Automatic Glass Upgrade for Legacy Light Cards in Dark/Glass Mode */
+.dark .bg-white {
+  background-color: rgba(15, 23, 42, 0.78) !important;
+  backdrop-filter: blur(14px);
+}
+.dark .bg-slate-50,
+.dark .bg-slate-50\/70,
+.dark .bg-slate-50\/60,
+.dark .bg-slate-50\/50 {
+  background-color: rgba(30, 41, 59, 0.6) !important;
+}
+.dark .bg-slate-100 {
+  background-color: rgba(30, 41, 59, 0.85) !important;
+}
+.dark .border-slate-200,
+.dark .border-slate-100 {
+  border-color: rgba(148, 163, 184, 0.18) !important;
+}
+.dark .text-slate-900,
+.dark .text-slate-800 {
+  color: #f1f5f9 !important;
+}
+.dark .text-slate-700,
+.dark .text-slate-600 {
+  color: #cbd5e1 !important;
+}
+.dark .text-slate-500,
+.dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: rgba(15, 23, 42, 0.75);
+  color: #f8fafc;
+  border-color: rgba(148, 163, 184, 0.25);
+}
+
+/* Light mode subtle glass polish on existing rounded cards */
+:root .rounded-2xl.bg-white {
+  background-color: rgba(255, 255, 255, 0.80);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-color: rgba(203, 213, 225, 0.55);
+  box-shadow: var(--glass-shadow);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+
+/* Rich Academy Article Typography (.bos-prose) */
+.bos-prose {
+  line-height: 1.95;
+  font-size: 0.9375rem;
+}
+.bos-prose h2 {
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin-top: 1.75rem;
+  margin-bottom: 0.75rem;
+  color: var(--bos-text);
+}
+.bos-prose h3 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-top: 1.4rem;
+  margin-bottom: 0.6rem;
+  color: var(--bos-text);
+}
+.bos-prose p {
+  margin-bottom: 1rem;
+}
+.bos-prose ul {
+  list-style-type: disc;
+  padding-right: 1.5rem;
+  margin-bottom: 1rem;
+}
+.bos-prose ol {
+  list-style-type: decimal;
+  padding-right: 1.5rem;
+  margin-bottom: 1rem;
+}
+.bos-prose li {
+  margin-bottom: 0.45rem;
+}
+.bos-prose blockquote {
+  border-right: 4px solid var(--bos-accent);
+  background: var(--bos-primary-soft);
+  padding: 0.85rem 1.1rem;
+  border-radius: 0.75rem;
+  margin: 1.25rem 0;
+}
+.bos-prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  background: rgba(100, 116, 139, 0.14);
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.4rem;
+  direction: ltr;
+  display: inline-block;
+}
+.bos-prose img {
+  max-width: 100%;
+  border-radius: 1rem;
+  margin: 1.25rem auto;
+  border: 1px solid var(--glass-border-subtle);
+  box-shadow: var(--glass-shadow);
+}
+.bos-prose a {
+  color: var(--bos-accent);
+  text-decoration: underline;
+}
+
+/* Login Presentation Carousel Smooth Transitions */
+@keyframes bosFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.bos-float {
+  animation: bosFloat 3.4s ease-in-out infinite;
+}
+
+.bos-slide-layer {
+  transition:
+    opacity 650ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 650ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+/* Accessibility & Reduced-Motion Support (§2.7–§2.9) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Crisp scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.65);
+}

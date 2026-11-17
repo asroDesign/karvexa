@@ -1,0 +1,29 @@
+# Business OS — Complete Local (Room) ↔ REST API ↔ Server (PostgreSQL) Database Mapping
+
+Every table and shared field is mapped 1:1 across Android Room, `/api/v1` JSON (`snake_case`), and PostgreSQL (`src/db/schema.ts`).
+
+| Domain | Android Room Table | PostgreSQL Table | Shared Key Fields (`snake_case`) | Sync Direction | Notes |
+| --- | --- | --- | --- | :---: | --- |
+| Organizations | `organizations` | `organizations` | `id`, `name`, `legal_name`, `business_type`, `base_currency`, `currency_scale`, `timezone`, `fiscal_year_start`, `status` | Pull | Server authoritative |
+| Users | `users` | `users` | `id`, `mobile`, `email`, `full_name`, `status` | Pull | Auth context |
+| Memberships | `organization_members` | `organization_members` | `id`, `organization_id`, `user_id`, `status`, `is_owner` | Pull | Drives tenant isolation |
+| Contacts | `contacts` | `contacts` | `id`, `organization_id`, `code`, `type`, `display_name`, `first_name`, `last_name`, `company_name`, `national_id`, `economic_code`, `mobile`, `phone`, `email`, `address`, `postal_code`, `group_id`, `credit_limit`, `opening_balance`, `notes`, `is_active`, `version` | Bi-Dir | Field-diff conflict check + Tombstone |
+| Products | `products` | `products` | `id`, `organization_id`, `code`, `name`, `description`, `item_type`, `category_id`, `brand_id`, `barcode`, `base_unit_id`, `purchase_price`, `sale_price`, `tax_rate`, `minimum_stock`, `maximum_stock`, `track_inventory`, `allow_negative_stock`, `is_active`, `attributes`, `version` | Bi-Dir | Field-diff conflict check + Tombstone |
+| Product Units | `product_units` | `product_units` | `id`, `organization_id`, `product_id`, `unit_id`, `conversion_factor` | Pull | Exact scale-4 decimal |
+| Warehouses | `warehouses` | `warehouses` | `id`, `organization_id`, `code`, `name`, `address`, `is_active` | Pull / Create | Multi-warehouse transfers |
+| Purchases | `purchase_documents` | `purchase_invoices` | `id`, `organization_id`, `client_document_id`, `supplier_id`, `warehouse_id`, `document_number`, `document_date`, `due_date`, `subtotal`, `discount_total`, `tax_total`, `shipping_cost`, `other_costs`, `grand_total`, `paid_amount`, `remaining_amount`, `status`, `notes`, `version` | Bi-Dir | Offline DRAFT -> Server CONFIRM |
+| Purchase Items | `purchase_items` | `purchase_invoice_items` | `id`, `purchase_id`, `product_id`, `quantity`, `unit_price`, `line_total` | Bi-Dir | Atomic with header |
+| Sales | `sales_documents` | `sales_invoices` | `id`, `organization_id`, `client_document_id`, `customer_id`, `warehouse_id`, `document_number`, `document_date`, `due_date`, `subtotal`, `discount_total`, `tax_total`, `shipping_cost`, `other_costs`, `grand_total`, `paid_amount`, `remaining_amount`, `status`, `notes`, `version` | Bi-Dir | Offline DRAFT -> Server Stock-Lock CONFIRM |
+| Sales Items | `sales_items` | `sales_invoice_items` | `id`, `sales_id`, `product_id`, `quantity`, `unit_price`, `line_total` | Bi-Dir | Atomic with header |
+| Inventory Docs | `inventory_documents` | `stock_documents` | `id`, `organization_id`, `client_document_id`, `document_number`, `document_type`, `warehouse_id`, `document_date`, `status`, `reason` | Bi-Dir | Server posts to Stock Ledger |
+| Stock Ledger | `stock_ledger_projection` | `stock_ledger` | `id`, `organization_id`, `product_id`, `warehouse_id`, `stock_document_id`, `movement_type`, `quantity_delta`, `unit_cost`, `value_delta`, `balance_after_qty`, `movement_date` | Pull | Server-authoritative source of truth |
+| Accounts | `accounts` | `accounts` | `id`, `organization_id`, `code`, `name`, `parent_id`, `account_type`, `normal_balance`, `is_active` | Pull | Chart of Accounts |
+| Journal Entries | `journal_entries` | `journal_entries` | `id`, `organization_id`, `fiscal_year_id`, `client_document_id`, `document_number`, `document_date`, `description`, `source_type`, `source_id`, `status`, `version` | Bi-Dir | Draft offline only; Confirmed immutable |
+| Journal Lines | `journal_entry_lines` | `journal_entry_lines` | `id`, `journal_entry_id`, `account_id`, `contact_id`, `cost_center_id`, `description`, `debit`, `credit` | Bi-Dir | `SUM(debit) == SUM(credit)` |
+| Financial Accounts | `financial_accounts` | `financial_accounts` | `id`, `organization_id`, `name`, `account_type`, `bank_name`, `account_number`, `balance`, `is_active` | Pull | Bank & Cashboxes |
+| Financial Txs | `financial_transactions` | `financial_transactions` | `id`, `organization_id`, `transaction_type`, `account_id`, `destination_account_id`, `contact_id`, `amount`, `transaction_date`, `payment_method`, `reference_number`, `related_document_type`, `related_document_id`, `status` | Bi-Dir | Strict idempotency |
+| Cheques | `cheques` | `cheques` | `id`, `organization_id`, `cheque_number`, `serial_number`, `bank_name`, `branch_name`, `account_number`, `amount`, `issue_date`, `due_date`, `contact_id`, `direction`, `status` | Bi-Dir | Event-driven status history |
+| Outbox / Inbox | `sync_outbox` (Room) | `sync_inbox` (PG) | `event_id`, `organization_id`, `device_id`, `idempotency_key`, `entity_type`, `entity_id`, `operation`, `result_status` | Push | Exactly-once processing |
+| Change Log | `sync_cursor_state` (Room) | `sync_change_log` + `sync_checkpoints` (PG) | `seq`, `change_id`, `entity_type`, `entity_id`, `operation` (`UPSERT\|TOMBSTONE`), `version`, `cursor` | Pull | Monotonic opaque cursor |
+| Conflicts | `local_sync_conflicts` | `sync_conflicts` | `id`, `entity_type`, `entity_id`, `conflict_type`, `local_version`, `server_version`, `local_payload`, `server_payload`, `conflicting_fields`, `resolution_status` | Bi-Dir | Domain-restricted resolution |
+| Telemetry | Local Sync Summary | `sync_logs` | `sync_id`, `device_id`, `organization_id`, `started_at`, `finished_at`, `push_count`, `pull_count`, `success_count`, `failure_count`, `conflict_count`, `duration_ms` | Server | Admin Portal Monitoring |
