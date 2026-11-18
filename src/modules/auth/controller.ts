@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { randomBytes } from "node:crypto";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
@@ -6,6 +7,7 @@ import {
   accountingPolicies,
   branches,
   devices,
+  fiscalYears,
   idempotencyKeys,
   organizationMembers,
   organizations,
@@ -63,8 +65,9 @@ const registerSchema = z.object({
   full_name: z.string().min(2, "نام کامل حداقل ۲ کاراکتر است."),
   mobile: z.string().min(10).max(20),
   email: z.string().email().optional(),
-  password: z.string().min(6, "رمز عبور حداقل ۶ کاراکتر باشد."),
+  password: z.string().min(6, "رمز عبور حداقل ۶ کاراکتر باشد.").optional(),
   organization_name: z.string().min(2, "نام سازمان الزامی است.").default("کسب‌وکار جدید"),
+  otp_code: z.string().min(4).max(8),
   device: deviceRegistrationSchema.optional(),
 });
 
@@ -83,6 +86,22 @@ const registerDeviceSchema = z.object({
   app_version: z.string().optional(),
 });
 
+async function getDefaultOrganizationContext(organizationId: string | null) {
+  if (!organizationId) return { fiscalYearId: null, branchId: null };
+  const [[fiscalYear], [branch]] = await Promise.all([
+    db.select({ id: fiscalYears.id })
+      .from(fiscalYears)
+      .where(and(eq(fiscalYears.organizationId, organizationId), eq(fiscalYears.isDefault, true)))
+      .orderBy(desc(fiscalYears.createdAt))
+      .limit(1),
+    db.select({ id: branches.id })
+      .from(branches)
+      .where(and(eq(branches.organizationId, organizationId), eq(branches.isDefault, true), eq(branches.isActive, true)))
+      .limit(1),
+  ]);
+  return { fiscalYearId: fiscalYear?.id ?? null, branchId: branch?.id ?? null };
+}
+
 export async function handleAuthRoutes(
   req: NextRequest,
   method: string,
@@ -92,6 +111,127 @@ export async function handleAuthRoutes(
   checkClientVersion(req);
   const sub = segments[1] ?? "";
   const id = segments[2];
+
+  // Request an OTP before creating a new account.
+  if (method === "POST" && sub === "register-otp") {
+    const ip = getClientIp(req);
+    checkRateLimit(`register-otp:${ip}`, 10, 60_000);
+    const body = z.object({ mobile: z.string().min(10).max(20) }).parse(await req.json());
+    const mobile = normalizeIranMobile(body.mobile);
+    if (!/^09\d{9}$/.test(mobile)) {
+      throw new ApiError(422, "INVALID_MOBILE", "شماره موبایل باید با فرمت صحیح 09XXXXXXXXX وارد شود.");
+    }
+    checkRateLimit(`register-otp-mobile:${mobile}`, 5, 5 * 60_000);
+    const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.phone, mobile)).limit(1);
+    if (existing) throw new ApiError(409, "MOBILE_ALREADY_REGISTERED", "این شماره موبایل قبلاً ثبت‌نام کرده است.");
+    const otpRes = await issueOtpCode({ mobile, purpose: "VERIFY_MOBILE" });
+    return ok({ action: "register-otp", status: "OTP_SENT", ...otpRes });
+  }
+
+  // Request a passwordless login OTP. The response intentionally does not disclose whether the mobile is registered.
+  if (method === "POST" && sub === "request-login-otp") {
+    const ip = getClientIp(req);
+    checkRateLimit(`login-otp:${ip}`, 10, 60_000);
+    const body = z.object({ mobile: z.string().min(10).max(20) }).parse(await req.json());
+    const mobile = normalizeIranMobile(body.mobile);
+    if (!/^09\d{9}$/.test(mobile)) {
+      throw new ApiError(422, "INVALID_MOBILE", "شماره موبایل باید با فرمت صحیح 09XXXXXXXXX وارد شود.");
+    }
+    checkRateLimit(`login-otp-mobile:${mobile}`, 5, 5 * 60_000);
+    const [user] = await db.select({ id: users.id, status: users.status })
+      .from(users).where(eq(users.phone, mobile)).limit(1);
+    if (user?.status === "ACTIVE") {
+      const otpRes = await issueOtpCode({ mobile, purpose: "LOGIN_OTP" });
+      return ok({ action: "request-login-otp", status: "OTP_SENT", ...otpRes });
+    }
+    return ok({ action: "request-login-otp", status: "OTP_SENT", expires_in_seconds: 300 });
+  }
+
+  // Verify a passwordless login OTP and establish the same session/device context as password login.
+  if (method === "POST" && sub === "login-otp") {
+    const ip = getClientIp(req);
+    checkRateLimit(`login-otp-verify:${ip}`, 20, 60_000);
+    const body = z.object({
+      mobile: z.string().min(10).max(20),
+      otp_code: z.string().min(4).max(8),
+      device: deviceRegistrationSchema.optional(),
+    }).parse(await req.json());
+    const mobile = normalizeIranMobile(body.mobile);
+    if (!/^09\d{9}$/.test(mobile)) {
+      throw new ApiError(422, "INVALID_MOBILE", "شماره موبایل باید با فرمت صحیح 09XXXXXXXXX وارد شود.");
+    }
+    await verifyAndConsumeOtpCode({ mobile, purpose: "LOGIN_OTP", code: body.otp_code });
+    const [user] = await db.select().from(users).where(eq(users.phone, mobile)).limit(1);
+    if (!user || user.status !== "ACTIVE") {
+      throw new ApiError(401, "INVALID_OTP", "کد تایید یا شماره موبایل معتبر نیست.");
+    }
+    if (!user.mobileVerified) {
+      await db.update(users).set({ mobileVerified: true, updatedAt: new Date() }).where(eq(users.id, user.id));
+    }
+    const memberships = await getUserOrganizations(user.id);
+    const defaultOrgId = memberships[0]?.organizationId ?? null;
+
+    let registeredDevice = null;
+    if (body.device && defaultOrgId) {
+      const [existingDev] = await db.select().from(devices)
+        .where(and(eq(devices.organizationId, defaultOrgId), eq(devices.deviceUuid, body.device.device_id)))
+        .limit(1);
+      if (existingDev) {
+        [registeredDevice] = await db.update(devices).set({
+          deviceName: body.device.device_name,
+          appVersion: body.device.app_version ?? existingDev.appVersion,
+          osVersion: body.device.os_version ?? existingDev.osVersion,
+          status: "ACTIVE",
+          updatedAt: new Date(),
+        }).where(eq(devices.id, existingDev.id)).returning();
+      } else {
+        [registeredDevice] = await db.insert(devices).values({
+          organizationId: defaultOrgId,
+          userId: user.id,
+          deviceUuid: body.device.device_id,
+          deviceName: body.device.device_name,
+          platform: body.device.platform.toUpperCase(),
+          osVersion: body.device.os_version ?? null,
+          appVersion: body.device.app_version ?? null,
+          status: "ACTIVE",
+        }).returning();
+      }
+    }
+
+    const tokens = await createSessionTokens({
+      user,
+      organizationId: defaultOrgId,
+      ipAddress: ip,
+      userAgent: req.headers.get("user-agent"),
+    });
+    const { fiscalYearId, branchId } = await getDefaultOrganizationContext(defaultOrgId);
+    await db.update(users).set({ lastLoginAt: new Date(), mobileVerified: true }).where(eq(users.id, user.id));
+    await recordAuditLog({
+      organizationId: defaultOrgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      scope: user.isPlatformAdmin ? "PLATFORM" : "ORGANIZATION",
+      action: "LOGIN_OTP_SUCCESS",
+      entityType: "SESSION",
+      entityId: tokens.session.id,
+      ipAddress: ip,
+    });
+
+    const res = ok({
+      user: { id: user.id, full_name: user.fullName, email: user.email, mobile: user.phone, is_platform_admin: user.isPlatformAdmin },
+      organizations: memberships,
+      active_organization_id: defaultOrgId,
+      active_fiscal_year_id: fiscalYearId,
+      active_branch_id: branchId,
+      device: registeredDevice,
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+      expires_in: tokens.expiresIn,
+      token_type: "Bearer",
+    });
+    attachAuthCookies(res, { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, activeOrgId: defaultOrgId });
+    return res;
+  }
 
   // POST /api/v1/auth/register (Master Prompt 07 §3 — Atomic User + Org + Owner RBAC + Device + Policy + Sync Init + Idempotency)
   if (method === "POST" && sub === "register") {
@@ -134,7 +274,15 @@ export async function handleAuthRoutes(
       throw new ApiError(409, "MOBILE_ALREADY_REGISTERED", "این شماره موبایل یا ایمیل قبلاً ثبت‌نام کرده است.");
     }
 
-    const passwordHash = await hashPassword(body.password);
+    await verifyAndConsumeOtpCode({
+      mobile: normMobile,
+      purpose: "VERIFY_MOBILE",
+      code: body.otp_code,
+    });
+
+    // OTP is the primary sign-in credential. Keep password registration backward-compatible,
+    // but create an unguessable secret when the client uses the passwordless registration flow.
+    const passwordHash = await hashPassword(body.password ?? randomBytes(32).toString("base64url"));
 
     const created = await db.transaction(async (tx) => {
       const [user] = await tx
@@ -144,7 +292,7 @@ export async function handleAuthRoutes(
           email,
           phone: normMobile,
           passwordHash,
-          mobileVerified: false, // Distinct from verified account!
+          mobileVerified: true,
           isPlatformAdmin: false,
           status: "ACTIVE",
         })
@@ -247,6 +395,8 @@ export async function handleAuthRoutes(
     });
 
     await ensurePrompt05OrgDefaults(created.org.id);
+    const { fiscalYearId: activeFiscalYearId, branchId: activeBranchId } =
+      await getDefaultOrganizationContext(created.org.id);
 
     const tokens = await createSessionTokens({
       user: created.user,
@@ -278,6 +428,8 @@ export async function handleAuthRoutes(
       },
       organization: created.org,
       active_organization_id: created.org.id,
+      active_fiscal_year_id: activeFiscalYearId,
+      active_branch_id: activeBranchId,
       device: created.device,
       access_token: tokens.accessToken,
       refresh_token: tokens.refreshToken,
@@ -391,6 +543,8 @@ export async function handleAuthRoutes(
       ipAddress: ip,
       userAgent: req.headers.get("user-agent"),
     });
+    const { fiscalYearId: activeFiscalYearId, branchId: activeBranchId } =
+      await getDefaultOrganizationContext(defaultOrgId);
 
     await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
     await recordAuditLog({
@@ -414,6 +568,8 @@ export async function handleAuthRoutes(
       },
       organizations: memberships,
       active_organization_id: defaultOrgId,
+      active_fiscal_year_id: activeFiscalYearId,
+      active_branch_id: activeBranchId,
       device: registeredDevice,
       access_token: tokens.accessToken,
       refresh_token: tokens.refreshToken,

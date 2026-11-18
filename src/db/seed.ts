@@ -56,6 +56,13 @@ import {
   warehouses,
 } from "@/db/schema";
 import { hashPassword } from "@/lib/auth";
+import { currentJalaliDate, jalaliToGregorianIso } from "@/lib/jalali";
+
+function dayBeforeIso(isoDate: string): string {
+  const date = new Date(`${isoDate}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
 
 export const PERMISSION_DEFINITIONS: Array<{
   scope: "PLATFORM" | "ORGANIZATION";
@@ -143,14 +150,32 @@ export async function bootstrapOrganizationDefaults(
     ])
     .returning();
 
-  // 3. Fiscal Year + 4 Quarterly Periods
+  // 3. Current Jalali fiscal year + 4 open quarterly periods
+  const fiscalYear = Number(currentJalaliDate().split("/")[0]);
+  const fiscalYearStart = jalaliToGregorianIso(`${fiscalYear}/01/01`);
+  const fiscalYearEnd = dayBeforeIso(jalaliToGregorianIso(`${fiscalYear + 1}/01/01`));
+  const quarterNames = ["بهار", "تابستان", "پاییز", "زمستان"];
+  const periods = [1, 4, 7, 10].map((startMonth, index) => {
+    const nextStart = index === 3
+      ? jalaliToGregorianIso(`${fiscalYear + 1}/01/01`)
+      : jalaliToGregorianIso(`${fiscalYear}/${startMonth + 3}/01`);
+    return {
+      organizationId,
+      name: `فصل ${quarterNames[index]} ${fiscalYear}`,
+      periodNumber: index + 1,
+      startDate: jalaliToGregorianIso(`${fiscalYear}/${startMonth}/01`),
+      endDate: dayBeforeIso(nextStart),
+      status: "OPEN" as const,
+    };
+  });
+
   const [fy] = await tx
     .insert(fiscalYears)
     .values({
       organizationId,
-      name: "سال مالی ۱۴۰۴",
-      startDate: "2025-03-21",
-      endDate: "2026-03-20",
+      name: `سال مالی ${fiscalYear}`,
+      startDate: fiscalYearStart,
+      endDate: fiscalYearEnd,
       status: "OPEN",
       isDefault: true,
     })
@@ -158,12 +183,7 @@ export async function bootstrapOrganizationDefaults(
 
   const createdPeriods = await tx
     .insert(accountingPeriods)
-    .values([
-      { organizationId, fiscalYearId: fy.id, name: "فصل بهار ۱۴۰۴ (بسته‌شده)", periodNumber: 1, startDate: "2025-03-21", endDate: "2025-06-21", status: "CLOSED" },
-      { organizationId, fiscalYearId: fy.id, name: "فصل تابستان ۱۴۰۴", periodNumber: 2, startDate: "2025-06-22", endDate: "2025-09-22", status: "OPEN" },
-      { organizationId, fiscalYearId: fy.id, name: "فصل پاییز ۱۴۰۴", periodNumber: 3, startDate: "2025-09-23", endDate: "2025-12-21", status: "OPEN" },
-      { organizationId, fiscalYearId: fy.id, name: "فصل زمستان ۱۴۰۴", periodNumber: 4, startDate: "2025-12-22", endDate: "2026-03-20", status: "OPEN" },
-    ])
+    .values(periods.map((period) => ({ ...period, fiscalYearId: fy.id })))
     .returning();
 
   // 4. Default Cost Center, Unit, Warehouse
@@ -395,6 +415,11 @@ async function runSeed() {
       { planId: planEnterprise.id, featureId: featByCode.get("advanced_reports")!.id, enabled: true },
       { planId: planEnterprise.id, featureId: featByCode.get("multi_user")!.id, enabled: true, limitValue: 100 },
     ]);
+
+    // Demo tenants and sample business records are opt-in only. System roles,
+    // permissions, and subscription plans above are always provisioned, while
+    // every normal environment starts with no fabricated organizations or books.
+    if (process.env.NODE_ENV === "production" || process.env.SEED_DEMO_DATA !== "true") return;
 
     // 4. Organizations (2 strictly isolated tenants)
     const [orgPars, orgSepehr] = await tx

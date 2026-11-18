@@ -98,46 +98,34 @@ const PRESENTATION_SLIDES: PresentationSlide[] = [
 ];
 
 function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActive: boolean }) {
-  // Slide 1: Animated Glass Financial Dashboard + Daily Bars
+  // Public preview illustrates capabilities without fabricated financial figures.
   if (slideIndex === 0) {
-    const bars = [42, 68, 54, 86, 62, 95, 78, 88];
     return (
       <div className="space-y-3">
         <div className="grid grid-cols-3 gap-2.5 text-right">
           <div className="rounded-xl bg-white/15 backdrop-blur border border-white/20 p-3">
             <div className="text-[10px] text-white/75">درآمد شناسایی‌شده</div>
-            <div className="text-sm font-extrabold text-white mt-1 tabular-nums">۳۴۲٬۰۰۰٬۰۰۰</div>
-            <div className="text-[10px] text-emerald-300 mt-0.5">+۱۸.۴٪ رشد روزانه</div>
+            <div className="text-sm font-extrabold text-white mt-1">پس از ورود</div>
+            <div className="text-[10px] text-emerald-300 mt-0.5">از دفتر واقعی سازمان</div>
           </div>
           <div className="rounded-xl bg-white/15 backdrop-blur border border-white/20 p-3">
             <div className="text-[10px] text-white/75">موجودی نقد و بانک</div>
-            <div className="text-sm font-extrabold text-white mt-1 tabular-nums">۲٬۲۰۰٬۰۰۰٬۰۰۰</div>
-            <div className="text-[10px] text-sky-200 mt-0.5">تراز ۱۰۰٪ دقیق ✓</div>
+            <div className="text-sm font-extrabold text-white mt-1">پس از ورود</div>
+            <div className="text-[10px] text-sky-200 mt-0.5">از حساب‌های ثبت‌شده</div>
           </div>
           <div className="rounded-xl bg-white/15 backdrop-blur border border-white/20 p-3">
             <div className="text-[10px] text-white/75">ارزش موجودی انبار</div>
-            <div className="text-sm font-extrabold text-white mt-1 tabular-nums">۲٬۶۵۸٬۰۰۰٬۰۰۰</div>
-            <div className="text-[10px] text-amber-200 mt-0.5">کاردکس لحظه‌ای</div>
+            <div className="text-sm font-extrabold text-white mt-1">پس از ورود</div>
+            <div className="text-[10px] text-amber-200 mt-0.5">از کاردکس انبار</div>
           </div>
         </div>
         <div className="rounded-xl bg-slate-950/35 border border-white/15 p-3.5">
           <div className="flex items-center justify-between text-[10px] text-white/80 mb-2.5">
-            <span>نمودار فروش و درآمد روزانه (کلیک جهت Drill-Down)</span>
-            <span className="font-mono text-emerald-300">LIVE LEDGER</span>
+            <span>نمودار فروش و درآمد روزانه</span>
+            <span className="font-mono text-emerald-300">دفتر سازمان</span>
           </div>
-          <div className="h-24 flex items-end gap-2 px-1" dir="ltr">
-            {bars.map((h, i) => (
-              <div key={i} className="flex-1 flex flex-col items-center gap-1 h-full justify-end">
-                <div
-                  style={{
-                    height: isActive ? `${h}%` : "18%",
-                    transition: `height 650ms cubic-bezier(0.22, 1, 0.36, 1) ${i * 45}ms`,
-                  }}
-                  className="w-full rounded-t-md bg-gradient-to-t from-violet-400/80 via-sky-300/90 to-emerald-300"
-                />
-                <span className="text-[9px] font-mono text-white/60">0{i + 1}</span>
-              </div>
-            ))}
+          <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-white/20 px-4 text-center text-[11px] text-white/70">
+            پس از ورود، نمودار بر اساس فاکتورها و گردش واقعی سازمان نمایش داده می‌شود.
           </div>
         </div>
       </div>
@@ -150,26 +138,26 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
       <div className="space-y-2.5">
         <div className="rounded-xl bg-slate-950/35 border border-white/15 p-3.5 space-y-2">
           <div className="flex items-center justify-between text-[11px] text-white">
-            <span className="font-bold">سند اختتامیه و تراز آزمایشی سال ۱۴۰۴</span>
+            <span className="font-bold">ثبت دوبل و کنترل تراز</span>
             <span className="px-2 py-0.5 rounded-full bg-emerald-400/20 text-emerald-200 font-mono text-[10px]">
               SUM(DR) == SUM(CR)
             </span>
           </div>
           {[
-            { code: "4101", name: "بستن درآمد فروش کالا", dr: "۳۴۲٬۰۰۰٬۰۰۰", cr: "۰" },
-            { code: "5101", name: "بستن بهای تمام‌شده و هزینه‌ها", dr: "۰", cr: "۲۲۴٬۰۰۰٬۰۰۰" },
-            { code: "3301", name: "انتقال سود خالص به سود انباشته", dr: "۰", cr: "۱۱۸٬۰۰۰٬۰۰۰" },
+            { code: "۱", name: "حساب‌های دارایی", side: "بدهکار" },
+            { code: "۲", name: "حساب‌های بدهی", side: "بستانکار" },
+            { code: "۳", name: "حقوق صاحبان سهام", side: "از دفترکل" },
           ].map((row) => (
             <div
               key={row.code}
-              className="flex items-center justify-between rounded-lg bg-white/10 px-3 py-2 text-[11px] text-white tabular-nums"
+              className="flex items-center justify-between rounded-lg bg-white/10 px-3 py-2 text-[11px] text-white"
             >
               <span className="truncate">
                 <span className="font-mono text-emerald-300 ml-1.5">{row.code}</span>
                 {row.name}
               </span>
               <span className="font-mono text-[10px] text-white/85 shrink-0">
-                {row.dr !== "۰" ? `بد: ${row.dr}` : `بس: ${row.cr}`}
+                {row.side}
               </span>
             </div>
           ))}
@@ -191,23 +179,23 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
       <div className="space-y-2.5">
         <div className="rounded-xl bg-slate-950/35 border border-white/15 p-3.5 space-y-2.5 text-white">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-bold">فاکتور فروش #SI-1404-208</span>
-            <span className="font-mono font-bold tabular-nums">۶٬۰۰۰٬۰۰۰ ریال</span>
+            <span className="font-bold">ثبت فاکتور فروش</span>
+            <span className="font-mono font-bold">دادهٔ سازمان</span>
           </div>
           <div className="space-y-1.5 text-[11px]">
             <div className="flex items-center justify-between">
               <span>پرداخت نقدی (صندوق)</span>
-              <span className="font-mono text-emerald-300">۱٬۰۰۰٬۰۰۰ ریال</span>
+              <span className="font-mono text-emerald-300">از فاکتور ثبت‌شده</span>
             </div>
             <div className="h-1.5 rounded-full bg-white/15 overflow-hidden">
               <div
-                style={{ width: isActive ? "17%" : "0%", transition: "width 700ms ease" }}
+                style={{ width: isActive ? "42%" : "0%", transition: "width 700ms ease" }}
                 className="h-full bg-emerald-400 rounded-full"
               />
             </div>
             <div className="flex items-center justify-between pt-1">
               <span>کارت‌خوان فروشگاهی (POS)</span>
-              <span className="font-mono text-sky-300">۳٬۰۰۰٬۰۰۰ ریال</span>
+              <span className="font-mono text-sky-300">از پرداخت ثبت‌شده</span>
             </div>
             <div className="h-1.5 rounded-full bg-white/15 overflow-hidden">
               <div
@@ -217,7 +205,7 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
             </div>
             <div className="flex items-center justify-between pt-1">
               <span>مانده نسیه / چک صیادی</span>
-              <span className="font-mono text-amber-300">۲٬۰۰۰٬۰۰۰ ریال</span>
+              <span className="font-mono text-amber-300">ماندهٔ واقعی</span>
             </div>
             <div className="h-1.5 rounded-full bg-white/15 overflow-hidden">
               <div
@@ -265,7 +253,7 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
         </div>
         <div className="grid grid-cols-3 gap-2 text-[10px] text-white text-center">
           <div className="rounded-xl bg-white/15 border border-white/20 p-2.5">
-            <div className="font-bold">۱۴ موجودیت Sync</div>
+            <div className="font-bold">همگام‌سازی آفلاین</div>
             <div className="text-white/75 mt-0.5">Push / Pull / Tombstone</div>
           </div>
           <div className="rounded-xl bg-white/15 border border-white/20 p-2.5">
@@ -289,15 +277,15 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
           <div className="text-[10px] text-emerald-300 font-semibold">دفتر مالی کسب‌وکار</div>
           <div className="font-bold">سود خالص بدون تحریف</div>
           <div className="text-[11px] text-white/80 tabular-nums">
-            برداشت ۵٬۰۰۰٬۰۰۰ ← حساب جاری مالک (۳۲۰۱)
+            برداشت مالک در حساب اختصاصی
           </div>
-          <div className="text-[10px] text-emerald-200">هزینه عملیاتی شرکت: ۰ ریال ✓</div>
+          <div className="text-[10px] text-emerald-200">جدا از هزینه‌های عملیاتی سازمان</div>
         </div>
         <div className="rounded-xl bg-slate-950/35 border border-white/15 p-3.5 space-y-1.5">
           <div className="text-[10px] text-amber-300 font-semibold">دفتر مالی شخصی مالک</div>
           <div className="font-bold">حریم خصوصی ۱۰۰٪ مجزا</div>
           <div className="text-[11px] text-white/80 tabular-nums">
-            ۳M مخارج خانه + ۲M قسط وام
+            ثبت مخارج و اقساط شخصی
           </div>
           <div className="text-[10px] text-rose-200">دسترسی پرسنل فروش: مسدود (403)</div>
         </div>
@@ -305,7 +293,7 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
       <div className="rounded-xl bg-white/15 border border-white/20 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-white">
         <span className="inline-flex items-center gap-1.5 font-semibold">
           <ShieldCheck className="h-4 w-4 text-emerald-300" />
-          <span>۸۷ جدول محافظت‌شده با PostgreSQL RLS + پیامک OTP رسمی</span>
+          <span>جداسازی داده با PostgreSQL RLS + پیامک OTP</span>
         </span>
         <span className="font-mono text-[10px] text-white/80">SMS.ir • Kavenegar</span>
       </div>
@@ -316,6 +304,12 @@ function SlideVisualStage({ slideIndex, isActive }: { slideIndex: number; isActi
 export function LoginView({ onSuccess }: LoginViewProps) {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [passwordLogin, setPasswordLogin] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpRequested, setOtpRequested] = useState(false);
+  const [fullName, setFullName] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeSlide, setActiveSlide] = useState(0);
@@ -346,6 +340,60 @@ export function LoginView({ onSuccess }: LoginViewProps) {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function requestOtp() {
+    setLoading(true);
+    setError(null);
+    try {
+      await apiFetch(authMode === "register" ? "/api/v1/auth/register-otp" : "/api/v1/auth/request-login-otp", {
+        method: "POST",
+        body: JSON.stringify({ mobile: identifier.trim() }),
+      });
+      setOtpRequested(true);
+      setOtpCode("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "ارسال کد تأیید ناموفق بود");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitOtp() {
+    setLoading(true);
+    setError(null);
+    try {
+      if (authMode === "register") {
+        await apiFetch("/api/v1/auth/register", {
+          method: "POST",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({
+            full_name: fullName.trim(),
+            organization_name: organizationName.trim(),
+            mobile: identifier.trim(),
+            otp_code: otpCode.trim(),
+          }),
+        });
+      } else {
+        await apiFetch("/api/v1/auth/login-otp", {
+          method: "POST",
+          body: JSON.stringify({ mobile: identifier.trim(), otp_code: otpCode.trim() }),
+        });
+      }
+      await onSuccess();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "تأیید کد ناموفق بود");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function switchAuthMode(mode: "login" | "register") {
+    setAuthMode(mode);
+    setOtpRequested(false);
+    setOtpCode("");
+    setError(null);
+    if (mode === "register") setPasswordLogin(false);
   }
 
   const slide = PRESENTATION_SLIDES[activeSlide];
@@ -384,9 +432,9 @@ export function LoginView({ onSuccess }: LoginViewProps) {
               </div>
 
               <div className="mb-6">
-                <h2 className="text-lg font-bold">ورود امن به پنل مدیریت و سازمان</h2>
+                <h2 className="text-lg font-bold">{authMode === "register" ? "ساخت حساب با شماره موبایل" : "ورود امن به پنل مدیریت و سازمان"}</h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-                  با شماره موبایل یا ایمیل سازمانی خود وارد شوید. احراز هویت با چرخش Refresh Token و جداسازی چندمستاجری محافظت می‌شود.
+                  {authMode === "register" ? "شماره موبایل را تأیید کنید تا حساب و فضای کاری تازه ساخته شود." : "با کد یکبارمصرف موبایل وارد شوید. ورود ایمیل و رمز نیز برای حساب‌های قدیمی در دسترس است."}
                 </p>
               </div>
 
@@ -397,48 +445,34 @@ export function LoginView({ onSuccess }: LoginViewProps) {
                 </div>
               )}
 
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  doLogin(identifier.trim(), password);
-                }}
-                className="space-y-4"
-              >
-                <div>
-                  <label className="block text-xs font-medium mb-1.5">
-                    شماره موبایل یا ایمیل
-                  </label>
-                  <input
-                    type="text"
-                    dir="ltr"
-                    placeholder="0912... یا user@company.ir"
-                    value={identifier}
-                    onChange={(e) => setIdentifier(e.target.value)}
-                    required
-                    className="w-full glass-input px-3.5 py-2.5 text-sm text-left"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1.5">رمز عبور</label>
-                  <input
-                    type="password"
-                    dir="ltr"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="w-full glass-input px-3.5 py-2.5 text-sm text-left"
-                  />
-                </div>
+              <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-slate-100/70 p-1 dark:bg-slate-900/40">
+                <button type="button" onClick={() => switchAuthMode("login")} className={`rounded-lg px-3 py-2 text-xs font-semibold ${authMode === "login" ? "bg-white shadow-sm dark:bg-slate-800" : "text-slate-500"}`}>ورود</button>
+                <button type="button" onClick={() => switchAuthMode("register")} className={`rounded-lg px-3 py-2 text-xs font-semibold ${authMode === "register" ? "bg-white shadow-sm dark:bg-slate-800" : "text-slate-500"}`}>ثبت‌نام</button>
+              </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full rounded-xl bg-gradient-to-l from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 disabled:opacity-50 text-white py-2.5 px-4 text-sm font-bold shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
-                >
+              <form onSubmit={(event) => { event.preventDefault(); if (authMode === "login" && passwordLogin) void doLogin(identifier.trim(), password); else if (otpRequested) void submitOtp(); else void requestOtp(); }} className="space-y-4">
+                {authMode === "register" && <>
+                  <label className="block text-xs font-medium">نام و نام خانوادگی<input value={fullName} onChange={(event) => setFullName(event.target.value)} required minLength={2} autoComplete="name" className="mt-1.5 w-full glass-input px-3.5 py-2.5 text-sm"/></label>
+                  <label className="block text-xs font-medium">نام کسب‌وکار<input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required minLength={2} autoComplete="organization" className="mt-1.5 w-full glass-input px-3.5 py-2.5 text-sm"/></label>
+                </>}
+                <div>
+                  <label className="block text-xs font-medium mb-1.5">{authMode === "login" && passwordLogin ? "شماره موبایل یا ایمیل" : "شماره موبایل"}</label>
+                  <input type="text" dir="ltr" inputMode="tel" autoComplete="tel" placeholder={authMode === "login" && passwordLogin ? "0912... یا user@company.ir" : "0912..."} value={identifier} onChange={(event) => { setIdentifier(event.target.value); setOtpRequested(false); }} required className="w-full glass-input px-3.5 py-2.5 text-sm text-left"/>
+                </div>
+                {authMode === "login" && passwordLogin ? <div>
+                  <label className="block text-xs font-medium mb-1.5">رمز عبور</label>
+                  <input type="password" dir="ltr" autoComplete="current-password" placeholder="••••••••" value={password} onChange={(event) => setPassword(event.target.value)} required className="w-full glass-input px-3.5 py-2.5 text-sm text-left"/>
+                </div> : otpRequested && <div>
+                  <label className="block text-xs font-medium mb-1.5">کد تأیید پیامک‌شده</label>
+                  <input type="text" dir="ltr" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={otpCode} onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, ""))} required minLength={4} className="w-full glass-input px-3.5 py-2.5 text-sm text-left tracking-[0.3em]"/>
+                  <button type="button" onClick={() => void requestOtp()} disabled={loading} className="mt-2 text-xs font-medium text-violet-700 underline dark:text-violet-300">ارسال دوباره کد</button>
+                </div>}
+
+                <button type="submit" disabled={loading} className="w-full rounded-xl bg-gradient-to-l from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 disabled:opacity-50 text-white py-2.5 px-4 text-sm font-bold shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer">
                   <KeyRound className="h-4 w-4" />
-                  <span>{loading ? "در حال احراز هویت..." : "ورود به سامانه"}</span>
+                  <span>{loading ? "در حال پردازش…" : authMode === "login" && passwordLogin ? "ورود به سامانه" : otpRequested ? authMode === "register" ? "تأیید و ساخت حساب" : "تأیید کد و ورود" : "ارسال کد یکبارمصرف"}</span>
                 </button>
+                {authMode === "login" && <button type="button" onClick={() => { setPasswordLogin((enabled) => !enabled); setOtpRequested(false); setOtpCode(""); setError(null); }} className="w-full text-xs text-slate-500 underline">{passwordLogin ? "ورود با کد یکبارمصرف" : "ورود با ایمیل و رمز عبور"}</button>}
               </form>
             </div>
 
@@ -496,6 +530,7 @@ export function LoginView({ onSuccess }: LoginViewProps) {
               </div>
             </div>
 
+            <p className="mb-3 text-center text-[10px] text-slate-500 dark:text-slate-400">این بخش نمایش ساختار قابلیت‌هاست؛ اطلاعات مالی فقط پس از ورود از دفتر واقعی سازمان خوانده می‌شود.</p>
             {/* Smooth Layered Cross-Fade Stage (all 5 slides pre-mounted, zero flicker) */}
             <div className="grid flex-1">
               {PRESENTATION_SLIDES.map((s, idx) => {

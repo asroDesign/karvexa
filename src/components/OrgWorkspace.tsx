@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  ArrowLeftRight,
   BookOpen,
   Boxes,
   CheckCircle2,
@@ -32,6 +31,7 @@ import {
   SessionMeResponse,
 } from "@/lib/format";
 import { currentJalaliDate } from "@/lib/jalali";
+import { JalaliDatePicker } from "@/components/JalaliDatePicker";
 import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
 import { GlassDashboard } from "./GlassDashboard";
 import { UserAccessSettings } from "./UserAccessSettings";
@@ -114,8 +114,8 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     confirm_immediately: true,
     accounting_period_id: "",
     lines: [
-      { account_id: "", debit: "10000000.00", credit: "0.00", description: "" },
-      { account_id: "", debit: "0.00", credit: "10000000.00", description: "" },
+      { account_id: "", debit: "", credit: "", description: "" },
+      { account_id: "", debit: "", credit: "", description: "" },
     ],
   });
 
@@ -126,17 +126,11 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   const [transfers, setTransfers] = useState<Array<Record<string, unknown>>>([]);
   const [counts, setCounts] = useState<Array<Record<string, unknown>>>([]);
   const [productsList, setProductsList] = useState<Array<Record<string, unknown>>>([]);
-  const [transferForm, setTransferForm] = useState({
-    source_warehouse_id: "",
-    destination_warehouse_id: "",
-    product_id: "",
-    quantity: "2.0000",
-    notes: "انتقال اتمیک بین انبار",
-  });
   const [countForm, setCountForm] = useState({
     warehouse_id: "",
     product_id: "",
-    counted_qty: "24.0000",
+    counted_qty: "",
+    count_date_jalali: currentJalaliDate(),
     notes: "انبارگردانی دوره‌ای",
   });
 
@@ -146,14 +140,14 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     brands: Array<Record<string, unknown>>;
     units: Array<Record<string, unknown>>;
   }>({ categories: [], brands: [], units: [] });
-  const [barcodeInput, setBarcodeInput] = useState("6261002003501");
+  const [barcodeInput, setBarcodeInput] = useState("");
   const [barcodeResult, setBarcodeResult] = useState<Record<string, unknown> | null>(null);
   const [prodForm, setProdForm] = useState({
     code: "",
     name: "",
     base_unit_id: "",
-    purchase_price: "15000000.00",
-    sale_price: "21000000.00",
+    purchase_price: "",
+    sale_price: "",
     barcode: "",
   });
 
@@ -164,7 +158,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     display_name: "",
     type: "CUSTOMER",
     mobile: "",
-    credit_limit: "100000000.00",
+    credit_limit: "0.00",
   });
 
   // Commerce (Sales & Purchasing)
@@ -175,7 +169,8 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     warehouse_id: "",
     product_id: "",
     quantity: "1.0000",
-    unit_price: "54000000.00",
+    unit_price: "",
+    document_date_jalali: currentJalaliDate(),
   });
 
   // Treasury, Cheques, Consignments
@@ -183,20 +178,22 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   const [treasuryTxs, setTreasuryTxs] = useState<Array<Record<string, unknown>>>([]);
   const [chequesList, setChequesList] = useState<Array<Record<string, unknown>>>([]);
   const [consignmentsList, setConsignmentsList] = useState<Array<Record<string, unknown>>>([]);
+  const [consignmentSales, setConsignmentSales] = useState<Record<string, string>>({});
   const [txForm, setTxForm] = useState({
     kind: "receipts" as "receipts" | "payments",
     account_id: "",
-    amount: "25000000.00",
+    amount: "",
     payment_method: "BANK_TRANSFER",
-    description: "دریافت وجه از مشتری",
+    description: "",
+    transaction_date_jalali: currentJalaliDate(),
   });
 
   // Subscription
   const [subCurrent, setSubCurrent] = useState<Record<string, unknown> | null>(null);
   const [subPlans, setSubPlans] = useState<Array<Record<string, unknown>>>([]);
   const [cbzForm, setCbzForm] = useState({
-    sku: "bos_pro_monthly",
-    purchase_token: "CBZ-VALID-TEST2026A1",
+    sku: "",
+    purchase_token: "",
   });
 
   // Sync
@@ -248,13 +245,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           setTransfers(trs);
           setCounts(cnts);
           setProductsList(prods);
-          if (whs.length > 0 && !transferForm.source_warehouse_id) {
-            setTransferForm((p) => ({
-              ...p,
-              source_warehouse_id: String(whs[0].id),
-              destination_warehouse_id: String(whs[1]?.id ?? whs[0].id),
-              product_id: String(prods[0]?.id ?? ""),
-            }));
+          if (whs.length > 0) {
             setCountForm((p) => ({
               ...p,
               warehouse_id: String(whs[0].id),
@@ -296,7 +287,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               customer_id: String(cList[0].id),
               warehouse_id: String(wList[0]?.id ?? ""),
               product_id: String(prList[0]?.id ?? ""),
-              unit_price: String(prList[0]?.sale_price ?? "10000000.00"),
+              unit_price: String(prList[0]?.sale_price ?? ""),
             }));
           }
         } else if (activeTab === "treasury") {
@@ -320,6 +311,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           ]);
           setSubCurrent(cur);
           setSubPlans(plns);
+          setCbzForm((current) => ({ ...current, sku: current.sku || String(plns[0]?.cafebazaar_sku ?? "") }));
         } else if (activeTab === "sync") {
           const [sRes, stRes, cList, wList, pList] = await Promise.all([
             apiFetch<Record<string, unknown>>("/api/v1/sync/conflicts", { organizationId: orgId }),
@@ -423,24 +415,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     }
   }
 
-  async function executeTransfer(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await apiFetch("/api/v1/inventory/transfers", {
-        method: "POST",
-        organizationId: orgId,
-        body: JSON.stringify({
-          ...transferForm,
-          transfer_date_jalali: currentJalaliDate(),
-        }),
-      });
-      onToast("انتقال اتمیک انبار انجام شد: خروج از مبدأ و ورود به مقصد در یک تراکنش ثبت گردید.");
-      loadTab("inventory");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در انتقال انبار", "error");
-    }
-  }
-
   async function executeStockCount(e: React.FormEvent) {
     e.preventDefault();
     try {
@@ -449,7 +423,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         organizationId: orgId,
         body: JSON.stringify({
           warehouse_id: countForm.warehouse_id,
-          count_date_jalali: currentJalaliDate(),
+          count_date_jalali: countForm.count_date_jalali,
           notes: countForm.notes,
           items: [{ product_id: countForm.product_id, counted_qty: countForm.counted_qty }],
         }),
@@ -500,7 +474,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         body: JSON.stringify(contactForm),
       });
       onToast("طرف‌حساب جدید با موفقیت ثبت شد.");
-      setContactForm({ code: "", display_name: "", type: "CUSTOMER", mobile: "", credit_limit: "100000000.00" });
+      setContactForm({ code: "", display_name: "", type: "CUSTOMER", mobile: "", credit_limit: "0.00" });
       loadTab("contacts");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در ثبت طرف‌حساب", "error");
@@ -518,7 +492,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           client_document_id: crypto.randomUUID(),
           customer_id: saleForm.customer_id,
           warehouse_id: saleForm.warehouse_id,
-          document_date_jalali: currentJalaliDate(),
+          document_date_jalali: saleForm.document_date_jalali,
           items: [
             {
               product_id: saleForm.product_id,
@@ -562,7 +536,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           account_id: txForm.account_id,
           amount: txForm.amount,
           payment_method: txForm.payment_method,
-          transaction_date_jalali: currentJalaliDate(),
+          transaction_date_jalali: txForm.transaction_date_jalali,
           description: txForm.description,
         }),
       });
@@ -587,14 +561,19 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     }
   }
 
-  async function settleConsignment(docId: string) {
+  async function settleConsignment(docId: string, grossSales: string) {
+    if (!grossSales.trim() || !Number.isFinite(Number(grossSales)) || Number(grossSales) <= 0) {
+      onToast("مبلغ فروش واقعی و مثبت را برای تسویه وارد کنید.", "error");
+      return;
+    }
     try {
       await apiFetch(`/api/v1/consignments/${docId}/settlements`, {
         method: "POST",
         organizationId: orgId,
-        body: JSON.stringify({ gross_sales: "158000000.00" }),
+        body: JSON.stringify({ gross_sales: grossSales }),
       });
-      onToast("تسویه کالای امانی با کسر کارمزد دقیق Decimal انجام شد.");
+      onToast("تسویه با مبلغ فروش واردشده در سرور ثبت شد.");
+      setConsignmentSales((current) => ({ ...current, [docId]: "" }));
       loadTab("treasury");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در تسویه امانی", "error");
@@ -635,137 +614,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
       onToast("خروجی کامل داده‌های سازمان (JSON) بدون محدودیت اشتراک دریافت شد.");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در دریافت خروجی", "error");
-    }
-  }
-
-  async function simulateOfflinePush(mode: "CONTACT_CREATE" | "CONFLICT" | "OFFLINE_PURCHASE" | "STOCK_RACE") {
-    const devList = (syncData?.devices as Array<Record<string, unknown>>) ?? [];
-    const dev = devList[0];
-    if (!dev) {
-      onToast("دستگاه اندرویدی برای این سازمان ثبت نشده است.", "error");
-      return;
-    }
-    const targetContact = contactsList[0];
-    const targetWh = warehousesList[0];
-    const targetProd = productsList[0];
-
-    try {
-      const batchId = crypto.randomUUID();
-      let events: Array<Record<string, unknown>> = [];
-
-      if (mode === "CONFLICT" && targetContact) {
-        events = [
-          {
-            event_id: crypto.randomUUID(),
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "contact",
-            entity_id: String(targetContact.id),
-            operation: "UPDATE",
-            base_version: 0,
-            dependencies: [],
-            payload: {
-              display_name: `${String(targetContact.display_name)} (تغییر آفلاین اندروید)`,
-              mobile: "09120009988",
-            },
-          },
-        ];
-      } else if (mode === "OFFLINE_PURCHASE" && targetContact && targetWh && targetProd) {
-        const docUuid = crypto.randomUUID();
-        const createEvtId = crypto.randomUUID();
-        events = [
-          {
-            event_id: createEvtId,
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "purchase",
-            entity_id: docUuid,
-            operation: "CREATE",
-            base_version: null,
-            dependencies: [],
-            payload: {
-              supplier_id: String(targetContact.id),
-              warehouse_id: String(targetWh.id),
-              document_date: new Date().toISOString().slice(0, 10),
-              items: [{ product_id: String(targetProd.id), quantity: "2.0000", unit_price: "42000000.00" }],
-            },
-          },
-          {
-            event_id: crypto.randomUUID(),
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "purchase",
-            entity_id: docUuid,
-            operation: "CONFIRM",
-            base_version: 1,
-            dependencies: [createEvtId],
-            payload: {},
-          },
-        ];
-      } else if (mode === "STOCK_RACE" && targetContact && targetWh && targetProd) {
-        const docUuid = crypto.randomUUID();
-        const createEvtId = crypto.randomUUID();
-        events = [
-          {
-            event_id: createEvtId,
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "sales",
-            entity_id: docUuid,
-            operation: "CREATE",
-            base_version: null,
-            dependencies: [],
-            payload: {
-              customer_id: String(targetContact.id),
-              warehouse_id: String(targetWh.id),
-              document_date: new Date().toISOString().slice(0, 10),
-              items: [{ product_id: String(targetProd.id), quantity: "999.0000", unit_price: "54000000.00" }],
-            },
-          },
-          {
-            event_id: crypto.randomUUID(),
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "sales",
-            entity_id: docUuid,
-            operation: "CONFIRM",
-            base_version: 1,
-            dependencies: [createEvtId],
-            payload: {},
-          },
-        ];
-      } else {
-        const newUuid = crypto.randomUUID();
-        events = [
-          {
-            event_id: crypto.randomUUID(),
-            idempotency_key: crypto.randomUUID(),
-            entity_type: "contact",
-            entity_id: newUuid,
-            operation: "CREATE",
-            base_version: null,
-            dependencies: [],
-            payload: {
-              code: `C-MOB-${Math.floor(Math.random() * 900 + 100)}`,
-              display_name: `مشتری آفلاین Room #${Math.floor(Math.random() * 90 + 10)}`,
-              type: "CUSTOMER",
-              mobile: "09128889900",
-            },
-          },
-        ];
-      }
-
-      const res = await apiFetch<Record<string, unknown>>("/api/v1/sync/push", {
-        method: "POST",
-        organizationId: orgId,
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({
-          device_id: String(dev.id),
-          batch_id: batchId,
-          events,
-        }),
-      });
-      onToast(
-        `Push انجام شد — اعمال/تایید: ${String(res.applied_count)} | تعارض: ${String(res.conflict_count)} | تکراری: ${String(res.duplicate_count)}`
-      );
-      loadTab("sync");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در Sync Push", "error");
     }
   }
 
@@ -1054,11 +902,9 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">تاریخ سند شمسی (YYYY/MM/DD)</label>
-                    <input
-                      dir="ltr"
+                    <JalaliDatePicker
                       value={jForm.document_date_jalali}
-                      onChange={(e) => setJForm({ ...jForm, document_date_jalali: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-left"
+                      onChange={(value) => setJForm({ ...jForm, document_date_jalali: value })}
                     />
                   </div>
                   <div>
@@ -1335,64 +1181,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         {tab === "inventory" && (
           <div className="space-y-5">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {/* Atomic Warehouse Transfer */}
-              <form onSubmit={executeTransfer} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <ArrowLeftRight className="h-4 w-4 text-teal-600" />
-                  <span>انتقال اتمیک بین انبارها (Atomic Transfer)</span>
-                </h3>
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <label className="block text-slate-600 mb-1">انبار مبدأ</label>
-                    <select
-                      value={transferForm.source_warehouse_id}
-                      onChange={(e) => setTransferForm({ ...transferForm, source_warehouse_id: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                    >
-                      {warehousesList.map((w) => (
-                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-slate-600 mb-1">انبار مقصد</label>
-                    <select
-                      value={transferForm.destination_warehouse_id}
-                      onChange={(e) => setTransferForm({ ...transferForm, destination_warehouse_id: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                    >
-                      {warehousesList.map((w) => (
-                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-slate-600 mb-1">کالا</label>
-                    <select
-                      value={transferForm.product_id}
-                      onChange={(e) => setTransferForm({ ...transferForm, product_id: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                    >
-                      {productsList.map((p) => (
-                        <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-slate-600 mb-1">تعداد انتقال (Decimal)</label>
-                    <input
-                      dir="ltr"
-                      value={transferForm.quantity}
-                      onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left font-mono"
-                    />
-                  </div>
-                </div>
-                <button type="submit" className="w-full rounded-xl bg-teal-700 hover:bg-teal-800 text-white py-2 text-xs font-medium cursor-pointer">
-                  اجرای انتقال اتمیک انبار
-                </button>
-              </form>
-
               {/* Stock Count & Variance Adjustment */}
               <form onSubmit={executeStockCount} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
@@ -1428,12 +1216,16 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                     <label className="block text-slate-600 mb-1">موجودی واقعی شمارش‌شده</label>
                     <input
                       dir="ltr"
+                      required
                       value={countForm.counted_qty}
                       onChange={(e) => setCountForm({ ...countForm, counted_qty: e.target.value })}
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left font-mono"
                     />
                   </div>
                 </div>
+                <label className="block text-xs text-slate-600">تاریخ انبارگردانی شمسی
+                  <JalaliDatePicker className="mt-1" value={countForm.count_date_jalali} onChange={(value) => setCountForm({ ...countForm, count_date_jalali: value })} />
+                </label>
                 <button type="submit" className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white py-2 text-xs font-medium cursor-pointer">
                   تایید شمارش و ثبت سند تعدیل اختلاف در Ledger
                 </button>
@@ -1704,7 +1496,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           <div className="space-y-5">
             <form onSubmit={createDraftSale} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
               <h3 className="text-sm font-bold text-slate-900">ثبت فاکتور فروش جدید (پیش‌نویس ← تایید اتمیک انبار + حسابداری)</h3>
-              <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
                 <select
                   value={saleForm.customer_id}
                   onChange={(e) => setSaleForm({ ...saleForm, customer_id: e.target.value })}
@@ -1725,7 +1517,10 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 </select>
                 <select
                   value={saleForm.product_id}
-                  onChange={(e) => setSaleForm({ ...saleForm, product_id: e.target.value })}
+                  onChange={(e) => {
+                const product = productsList.find((item) => String(item.id) === e.target.value);
+                setSaleForm({ ...saleForm, product_id: e.target.value, unit_price: String(product?.sale_price ?? "") });
+              }}
                   className="rounded-xl border border-slate-200 px-3 py-2"
                 >
                   {productsList.map((p) => (
@@ -1739,6 +1534,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                   placeholder="تعداد"
                   className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
                 />
+                <label className="text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={saleForm.document_date_jalali} onChange={(value) => setSaleForm({ ...saleForm, document_date_jalali: value })}/></label>
                 <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
                   ایجاد پیش‌نویس فروش
                 </button>
@@ -1831,7 +1627,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               ))}
             </div>
 
-            <form onSubmit={recordTreasuryTx} className="bg-white rounded-2xl border border-slate-200 p-5 grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+            <form onSubmit={recordTreasuryTx} className="bg-white rounded-2xl border border-slate-200 p-5 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
               <select
                 value={txForm.kind}
                 onChange={(e) => setTxForm({ ...txForm, kind: e.target.value as "receipts" | "payments" })}
@@ -1860,6 +1656,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 onChange={(e) => setTxForm({ ...txForm, description: e.target.value })}
                 className="rounded-xl border border-slate-200 px-3 py-2"
               />
+              <label className="text-[11px]">تاریخ تراکنش شمسی<JalaliDatePicker className="mt-1" value={txForm.transaction_date_jalali} onChange={(value) => setTxForm({ ...txForm, transaction_date_jalali: value })}/></label>
               <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
                 ثبت تراکنش خزانه ({treasuryTxs.length})
               </button>
@@ -1900,13 +1697,12 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                       ارزش کل: {formatIrr(cd.total_value as string)} ریال • نرخ کارمزد: {String(cd.commission_rate)}٪
                     </div>
                     {cd.status !== "SETTLED" && (
-                      <button
-                        type="button"
-                        onClick={() => settleConsignment(String(cd.id))}
-                        className="rounded-lg bg-teal-700 text-white px-3 py-1 text-[11px] cursor-pointer"
-                      >
-                        ثبت تسویه امانت‌گذار با محاسبه دقیق کارمزد
-                      </button>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label className="text-[11px]">فروش واقعیِ تحقق‌یافته
+                          <input className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-left" dir="ltr" inputMode="decimal" value={consignmentSales[String(cd.id)] ?? ""} onChange={(event) => setConsignmentSales((current) => ({ ...current, [String(cd.id)]: event.target.value }))} />
+                        </label>
+                        <button type="button" onClick={() => void settleConsignment(String(cd.id), consignmentSales[String(cd.id)] ?? "")} className="rounded-lg bg-teal-700 text-white px-3 py-2 text-[11px] cursor-pointer">ثبت تسویه واقعی</button>
+                      </div>
                     )}
                   </div>
                 ))}
@@ -1955,7 +1751,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               <form onSubmit={verifyCafeBazaar} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 text-xs">
                 <h3 className="text-sm font-bold text-slate-900">اعتبارسنجی رسمی رسید کافه‌بازار (/api/v1/subscription/market/verify)</h3>
                 <p className="text-slate-500 leading-relaxed">
-                  برای تست رسید معتبر از فرمت <code className="font-mono bg-slate-100 px-1">CBZ-VALID-XXXXX1</code> و برای تست مسدودسازی رسید جعلی از هر متن دیگر استفاده کنید. استفاده مجدد (Replay) نیز مسدود می‌شود.
+                  توکن خرید صادرشده از رسید رسمی کافه‌بازار را وارد کنید؛ توکن ساختگی یا تکراری پذیرفته نمی‌شود.
                 </p>
                 <div>
                   <label className="block text-slate-700 mb-1">شناسه محصول (SKU)</label>
@@ -2028,48 +1824,10 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
 
             <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
               <div>
-                <h3 className="text-sm font-bold text-slate-900">آزمایشگاه زنده موتور همگام‌سازی دوطرفه (Master Prompt 04)</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  آزمایش مستقیم Outbox ← Inbox Idempotency، خرید آفلاین با تایید سرور، رقابت موجودی دو دستگاه، و Pull با Opaque Cursor + Acknowledge
-                </p>
+                <h3 className="text-sm font-bold text-slate-900">همگام‌سازی واقعی دستگاه‌ها</h3>
+                <p className="text-xs text-slate-500 mt-0.5">رویدادها و تعارض‌های ثبت‌شدهٔ دستگاه‌های متصل در ادامه نمایش داده می‌شوند.</p>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => simulateOfflinePush("CONTACT_CREATE")}
-                  className="rounded-xl bg-emerald-700 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
-                >
-                  ۱. ثبت آفلاین شخص (Client UUID)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => simulateOfflinePush("OFFLINE_PURCHASE")}
-                  className="rounded-xl bg-indigo-600 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
-                >
-                  ۲. خرید آفلاین + تایید انبار و حسابداری
-                </button>
-                <button
-                  type="button"
-                  onClick={() => simulateOfflinePush("STOCK_RACE")}
-                  className="rounded-xl bg-rose-700 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
-                >
-                  ۳. شبیه‌سازی کمبود موجودی چنددستگاهی
-                </button>
-                <button
-                  type="button"
-                  onClick={() => simulateOfflinePush("CONFLICT")}
-                  className="rounded-xl bg-amber-600 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
-                >
-                  ۴. شبیه‌سازی تعارض فیلد مرجع
-                </button>
-                <button
-                  type="button"
-                  onClick={simulateOfflinePullAndAck}
-                  className="rounded-xl bg-slate-900 text-white px-3.5 py-2 text-xs font-medium cursor-pointer"
-                >
-                  ۵. Pull (Opaque Cursor) + Acknowledge
-                </button>
-              </div>
+              <button type="button" onClick={simulateOfflinePullAndAck} className="rounded-xl bg-slate-900 text-white px-3.5 py-2 text-xs font-medium cursor-pointer">دریافت تغییرهای سرور و تأیید Cursor</button>
             </div>
 
             {pullOutput && (

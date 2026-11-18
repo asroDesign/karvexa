@@ -32,6 +32,8 @@ import {
   YAxis,
 } from "recharts";
 import { apiFetch, formatIrr, formatQty } from "@/lib/format";
+import { JalaliDatePicker, JalaliMonthPicker } from "@/components/JalaliDatePicker";
+import { currentJalaliDate } from "@/lib/jalali";
 
 export type AdvancedSubTab =
   | "personal_finance"
@@ -59,20 +61,20 @@ export function AdvancedModulesPanel({
   const [bizAccounts, setBizAccounts] = useState<Array<Record<string, unknown>>>([]);
   const [wdForm, setWdForm] = useState({
     business_financial_account_id: "",
-    amount: "5000000.00",
-    notes: "برداشت مالک بابت مخارج شخصی ماهانه",
+    amount: "",
+    notes: "",
   });
   const [pfTxForm, setPfTxForm] = useState({
     tx_type: "PERSONAL_EXPENSE",
     payment_source: "PERSONAL_CASH",
-    title: "مخارج خانه و خواربار",
-    amount: "3000000.00",
+    title: "",
+    amount: "",
     category_id: "",
     linked_withdrawal_id: "",
   });
   const [recForm, setRecForm] = useState({
-    title: "اجاره ماهانه منزل",
-    amount: "12000000.00",
+    title: "",
+    amount: "",
     frequency: "MONTHLY",
     start_date: new Date().toISOString().slice(0, 10),
     payment_source: "BUSINESS_BANK",
@@ -85,10 +87,11 @@ export function AdvancedModulesPanel({
   const [quickForm, setQuickForm] = useState({
     category_id: "",
     financial_account_id: "",
-    title: "هزینه پیک و ارسال مرسولات",
-    amount: "1500000.00",
+    title: "",
+    amount: "",
     tax_amount: "0.00",
     payment_method: "CASH",
+    tx_date_jalali: currentJalaliDate(),
   });
 
   // Mixed Sales & Quotations state
@@ -101,12 +104,13 @@ export function AdvancedModulesPanel({
     customer_id: "",
     warehouse_id: "",
     product_id: "",
-    quantity: "1.0000",
-    unit_price: "6000000.00",
+    quantity: "",
+    unit_price: "",
     discount_total: "0.00",
     tax_total: "0.00",
-    cash_amount: "1000000.00",
-    pos_amount: "3000000.00",
+    cash_amount: "",
+    pos_amount: "",
+    document_date_jalali: currentJalaliDate(),
   });
 
   // Variants & Smart Replenishment state
@@ -115,10 +119,10 @@ export function AdvancedModulesPanel({
   const [varForm, setVarForm] = useState({
     product_id: "",
     sku: "",
-    variant_name: "سایز L / مشکی",
-    purchase_price: "12000000.00",
-    sale_price: "16500000.00",
-    opening_qty: "10.0000",
+    variant_name: "",
+    purchase_price: "",
+    sale_price: "",
+    opening_qty: "",
   });
 
   // CRM & Employees state
@@ -136,7 +140,7 @@ export function AdvancedModulesPanel({
   // Cheque Dashboard & Analytics state
   const [chequeDash, setChequeDash] = useState<Record<string, unknown> | null>(null);
   const [chequeChart, setChequeChart] = useState<Array<Record<string, unknown>>>([]);
-  const [chartMonth, setChartMonth] = useState("2025-09");
+  const [chartMonth, setChartMonth] = useState(() => currentJalaliDate().slice(0, 7).replace("/", "-"));
 
   const loadData = useCallback(async () => {
     if (!orgId) return;
@@ -222,7 +226,7 @@ export function AdvancedModulesPanel({
         const [cd, ca] = await Promise.all([
           apiFetch<Record<string, unknown>>("/api/v1/cheques/dashboard", { organizationId: orgId }),
           apiFetch<{ daily_series: Array<Record<string, unknown>> }>(
-            `/api/v1/cheques/analytics?month=${encodeURIComponent(chartMonth)}`,
+            `/api/v1/cheques/analytics?month_jalali=${encodeURIComponent(chartMonth.replace("-", "/"))}`,
             { organizationId: orgId }
           ),
         ]);
@@ -346,7 +350,7 @@ export function AdvancedModulesPanel({
           client_document_id: crypto.randomUUID(),
           customer_id: mixedForm.customer_id,
           warehouse_id: mixedForm.warehouse_id,
-          document_date: new Date().toISOString().slice(0, 10),
+          document_date_jalali: mixedForm.document_date_jalali,
           discount_total: mixedForm.discount_total,
           tax_total: mixedForm.tax_total,
           items: [
@@ -677,12 +681,7 @@ export function AdvancedModulesPanel({
                 <option value="QUARTERLY">فصلی (QUARTERLY)</option>
                 <option value="ANNUALLY">سالانه (ANNUALLY)</option>
               </select>
-              <input
-                dir="ltr"
-                value={recForm.start_date}
-                onChange={(e) => setRecForm({ ...recForm, start_date: e.target.value })}
-                className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
-              />
+              <JalaliDatePicker value={recForm.start_date} onChange={(value) => setRecForm({ ...recForm, start_date: value })} format="iso" placeholder="تاریخ شروع شمسی" />
               <button type="submit" className="rounded-xl bg-amber-600 text-white py-2 font-medium cursor-pointer">
                 تعریف تعهد تکرارشونده
               </button>
@@ -750,7 +749,7 @@ export function AdvancedModulesPanel({
               </span>
             </div>
 
-            <form onSubmit={handleQuickEntry} className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+            <form onSubmit={handleQuickEntry} className="grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
               <select
                 required
                 value={quickForm.category_id}
@@ -793,6 +792,7 @@ export function AdvancedModulesPanel({
                 onChange={(e) => setQuickForm({ ...quickForm, amount: e.target.value })}
                 className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
               />
+              <label className="text-[11px]">تاریخ تراکنش شمسی<JalaliDatePicker className="mt-1" value={quickForm.tx_date_jalali} onChange={(value) => setQuickForm({ ...quickForm, tx_date_jalali: value })}/></label>
               <button
                 type="submit"
                 className={`rounded-xl text-white py-2 font-medium cursor-pointer ${quickKind === "EXPENSE" ? "bg-rose-600" : "bg-emerald-700"}`}
@@ -899,6 +899,7 @@ export function AdvancedModulesPanel({
                 </div>
               </div>
             </div>
+            <label className="block max-w-sm text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={mixedForm.document_date_jalali} onChange={(value) => setMixedForm({ ...mixedForm, document_date_jalali: value })}/></label>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
               <div>
@@ -1227,13 +1228,7 @@ export function AdvancedModulesPanel({
               </h3>
               <div className="flex items-center gap-2 text-xs">
                 <CalendarClock className="h-4 w-4 text-slate-400" />
-                <input
-                  type="month"
-                  dir="ltr"
-                  value={chartMonth}
-                  onChange={(e) => setChartMonth(e.target.value)}
-                  className="rounded-xl border border-slate-200 px-3 py-1.5 font-mono"
-                />
+                <JalaliMonthPicker value={chartMonth} onChange={setChartMonth} />
               </div>
             </div>
             <div className="h-72 w-full" dir="ltr">

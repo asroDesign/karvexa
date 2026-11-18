@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
+import { resolveCanonicalDate } from "@/lib/jalali";
 import { db } from "@/db";
 import {
   accountingCategories,
@@ -204,6 +205,7 @@ export async function handleQuickFinanceRoutes(
           amount: z.string().regex(/^\d+(\.\d{1,2})?$/),
           tax_amount: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
           tx_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          tx_date_jalali: z.string().optional(),
           payment_method: z.enum(["CASH", "POS", "BANK_TRANSFER", "CARD", "CHEQUE", "OTHER"]).default("BANK_TRANSFER"),
           receipt_url: z.string().nullable().optional(),
           description: z.string().optional(),
@@ -284,7 +286,7 @@ export async function handleQuickFinanceRoutes(
           .where(eq(financialAccounts.id, fa.id));
 
         const treasuryGlAccId = fa.accountId ?? (body.kind === "EXPENSE" ? mapping.creditAccountId : mapping.debitAccountId);
-        const txDate = body.tx_date || new Date().toISOString().slice(0, 10);
+        const txDate = resolveCanonicalDate(body.tx_date, body.tx_date_jalali);
 
         const lines =
           body.kind === "EXPENSE"

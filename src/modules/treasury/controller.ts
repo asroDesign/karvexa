@@ -28,7 +28,7 @@ import {
   okList,
   parseListQuery,
 } from "@/lib/errors";
-import { gregorianIsoToJalali, resolveCanonicalDate } from "@/lib/jalali";
+import { gregorianIsoToJalali, jalaliToGregorianIso, normalizePersianDigits, resolveCanonicalDate } from "@/lib/jalali";
 import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
 import { createJournalEntryTx, reverseJournalEntryTx } from "@/modules/accounting/service";
 
@@ -821,42 +821,73 @@ export async function handleChequeRoutes(
     });
   }
 
-  // GET /api/v1/cheques/analytics?month=YYYY-MM (§10.5 Daily Bar Chart Series)
+  // GET /api/v1/cheques/analytics?month_jalali=YYYY/MM (§10.5 Daily Bar Chart Series)
   if (method === "GET" && id === "analytics") {
     const ctx = await requireOrgContext(req, "cheques.view");
-    const monthParam =
-      req.nextUrl.searchParams.get("month") || new Date().toISOString().slice(0, 7);
-    const [yearStr, monStr] = monthParam.split("-");
-    const year = Number(yearStr) || new Date().getUTCFullYear();
-    const mon = Number(monStr) || new Date().getUTCMonth() + 1;
-    const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+    const jalaliMonthRaw = req.nextUrl.searchParams.get("month_jalali");
+    const monthParam = req.nextUrl.searchParams.get("month") || new Date().toISOString().slice(0, 7);
+    let startIso: string;
+    let endIso: string;
+    let monthLabel: string;
+    let jalaliMode = false;
+
+    if (jalaliMonthRaw) {
+      const normalized = normalizePersianDigits(jalaliMonthRaw.trim()).replace(/-/g, "/");
+      const match = /^(\d{4})\/(\d{1,2})$/.exec(normalized);
+      if (!match) throw new ApiError(422, "INVALID_JALALI_MONTH", "ماه شمسی معتبر نیست.");
+      const jalaliYear = Number(match[1]);
+      const jalaliMonth = Number(match[2]);
+      if (jalaliYear < 1200 || jalaliYear > 1599 || jalaliMonth < 1 || jalaliMonth > 12) {
+        throw new ApiError(422, "INVALID_JALALI_MONTH", "ماه شمسی خارج از بازهٔ مجاز است.");
+      }
+      startIso = jalaliToGregorianIso(`${jalaliYear}/${String(jalaliMonth).padStart(2, "0")}/01`);
+      const nextYear = jalaliMonth === 12 ? jalaliYear + 1 : jalaliYear;
+      const nextMonth = jalaliMonth === 12 ? 1 : jalaliMonth + 1;
+      const nextStart = jalaliToGregorianIso(`${nextYear}/${String(nextMonth).padStart(2, "0")}/01`);
+      endIso = new Date(Date.parse(`${nextStart}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+      monthLabel = `${jalaliYear}/${String(jalaliMonth).padStart(2, "0")}`;
+      jalaliMode = true;
+    } else {
+      const [yearStr, monStr] = monthParam.split("-");
+      const year = Number(yearStr) || new Date().getUTCFullYear();
+      const mon = Number(monStr) || new Date().getUTCMonth() + 1;
+      const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+      startIso = `${year}-${String(mon).padStart(2, "0")}-01`;
+      endIso = `${year}-${String(mon).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
+      monthLabel = `${year}-${String(mon).padStart(2, "0")}`;
+    }
+
+    const endTimestamp = Date.parse(`${endIso}T00:00:00Z`);
+    const startTimestamp = Date.parse(`${startIso}T00:00:00Z`);
+    const dayCount = Math.floor((endTimestamp - startTimestamp) / 86_400_000) + 1;
+    const dailyMap = new Map<string, { day: number; rec: bigint; iss: bigint }>();
+    for (let index = 0; index < dayCount; index++) {
+      const iso = new Date(startTimestamp + index * 86_400_000).toISOString().slice(0, 10);
+      const jalaliDay = Number(gregorianIsoToJalali(iso).split("/")[2]);
+      dailyMap.set(iso, { day: jalaliMode ? jalaliDay : Number(iso.slice(8, 10)), rec: BigInt(0), iss: BigInt(0) });
+    }
 
     const list = await db
       .select()
       .from(cheques)
       .where(eq(cheques.organizationId, ctx.organizationId));
 
-    const dailyMap = new Map<string, { rec: bigint; iss: bigint }>();
-    for (let d = 1; d <= daysInMonth; d++) {
-      const iso = `${year}-${String(mon).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      dailyMap.set(iso, { rec: BigInt(0), iss: BigInt(0) });
-    }
-
-    for (const c of list) {
-      const bucket = dailyMap.get(c.dueDate);
+    for (const cheque of list) {
+      const bucket = dailyMap.get(cheque.dueDate);
       if (!bucket) continue;
-      if (c.chequeType === "RECEIVABLE") bucket.rec = addDec(bucket.rec, c.amount);
-      else bucket.iss = addDec(bucket.iss, c.amount);
+      if (cheque.chequeType === "RECEIVABLE") bucket.rec = addDec(bucket.rec, cheque.amount);
+      else bucket.iss = addDec(bucket.iss, cheque.amount);
     }
 
     const daily_series = Array.from(dailyMap.entries()).map(([dateStr, vals]) => ({
       date: dateStr,
-      day: Number(dateStr.slice(8, 10)),
+      jalali_date: gregorianIsoToJalali(dateStr),
+      day: vals.day,
       received_amount: formatDecimal(vals.rec, 2),
       issued_amount: formatDecimal(vals.iss, 2),
     }));
 
-    return ok({ month: `${year}-${String(mon).padStart(2, "0")}`, daily_series });
+    return ok({ month: monthLabel, daily_series });
   }
 
   // GET /api/v1/cheques/due

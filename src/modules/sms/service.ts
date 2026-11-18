@@ -61,8 +61,12 @@ export async function sendSmsViaGateway(params: {
     ? params.message.replace(params.otpCode, "******")
     : params.message.slice(0, 220);
 
-  // Sandbox Mode OR missing live API key => Deterministic simulated delivery logged in `sms_logs`
+  // Sandbox delivery is a development aid only. Production must never claim that an OTP
+  // was sent to a customer when it was only generated locally.
   if (config.sandboxMode || !config.apiKey.trim()) {
+    if (process.env.NODE_ENV === "production") {
+      throw new ApiError(503, "SMS_PROVIDER_NOT_CONFIGURED", "ارسال پیامک واقعی پیکربندی نشده است؛ کلید API و حالت عملیاتی سرویس پیامک را تنظیم کنید.");
+    }
     const fakeRef = `SBX-${config.provider}-${Date.now().toString().slice(-6)}`;
     const [logRow] = await db
       .insert(smsLogs)

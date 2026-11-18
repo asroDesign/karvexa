@@ -33,6 +33,7 @@ import {
   YAxis,
 } from "recharts";
 import { apiFetch, formatDateFa, formatIrr } from "@/lib/format";
+import { JalaliDatePicker } from "@/components/JalaliDatePicker";
 
 interface GlassDashboardProps {
   orgId: string | null;
@@ -368,19 +369,9 @@ export function GlassDashboard({ orgId, onNavigate, onToast }: GlassDashboardPro
             ))}
             {range === "custom" && (
               <div className="flex items-center gap-1.5" dir="ltr">
-                <input
-                  type="date"
-                  value={customFrom}
-                  onChange={(e) => setCustomFrom(e.target.value)}
-                  className="glass-input px-2 py-1 text-xs font-mono"
-                />
+                <JalaliDatePicker value={customFrom} onChange={setCustomFrom} format="iso" placeholder="از تاریخ شمسی" allowEmpty />
                 <span>–</span>
-                <input
-                  type="date"
-                  value={customTo}
-                  onChange={(e) => setCustomTo(e.target.value)}
-                  className="glass-input px-2 py-1 text-xs font-mono"
-                />
+                <JalaliDatePicker value={customTo} onChange={setCustomTo} format="iso" placeholder="تا تاریخ شمسی" allowEmpty />
               </div>
             )}
           </div>

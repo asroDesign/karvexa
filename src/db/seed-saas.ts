@@ -7,7 +7,7 @@ const DEFAULT_PAYMENT_GATEWAYS = [
     displayNameFa: "درگاه پرداخت زرین‌پال (Zarinpal v4)",
     isActive: true,
     isDefault: true,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     merchantId: "",
     secretToken: "",
     extraConfig: {
@@ -22,7 +22,7 @@ const DEFAULT_PAYMENT_GATEWAYS = [
     displayNameFa: "درگاه پرداخت زیبال (Zibal v1)",
     isActive: true,
     isDefault: false,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     merchantId: "zibal",
     secretToken: "",
     extraConfig: {
@@ -36,7 +36,7 @@ const DEFAULT_PAYMENT_GATEWAYS = [
     displayNameFa: "درگاه پرداخت بله (Balleh Pay / Bale Wallet)",
     isActive: true,
     isDefault: false,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     merchantId: "",
     secretToken: "",
     extraConfig: {
@@ -49,7 +49,7 @@ const DEFAULT_PAYMENT_GATEWAYS = [
     displayNameFa: "درگاه پرداخت الکترونیک سامان (SEP / شاپرک)",
     isActive: true,
     isDefault: false,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     merchantId: "",
     secretToken: "",
     extraConfig: {
@@ -65,7 +65,7 @@ const DEFAULT_SMS_PROVIDERS = [
     provider: "SMS_IR",
     isActive: true,
     isDefault: true,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     apiKey: "",
     lineNumber: "30007732000000",
     otpTemplateId: "100000",
@@ -80,7 +80,7 @@ const DEFAULT_SMS_PROVIDERS = [
     provider: "KAVENEGAR",
     isActive: true,
     isDefault: false,
-    sandboxMode: true,
+    sandboxMode: process.env.NODE_ENV !== "production",
     apiKey: "",
     lineNumber: "10004346",
     otpTemplateId: "businessos-otp",

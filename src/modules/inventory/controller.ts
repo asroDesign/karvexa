@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
 import {
@@ -11,6 +11,7 @@ import {
   stockLedger,
   stockTransferItems,
   stockTransfers,
+  productVariants,
   warehouses,
 } from "@/db/schema";
 import { ensureSeeded } from "@/db/seed";
@@ -62,6 +63,7 @@ const stockDocSchema = z.object({
     .array(
       z.object({
         product_id: z.string().uuid(),
+        variant_id: z.string().uuid().nullable().optional(),
         quantity: z.string().regex(/^\d+(\.\d{1,4})?$/),
         unit_cost: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
       })
@@ -130,6 +132,14 @@ export async function handleWarehouseAndInventoryRoutes(
     if (method === "POST" && !seg1) {
       const ctx = await requireOrgContext(req, "inventory.confirm", { requireActiveSubscription: true });
       const body = createWhSchema.parse(await req.json());
+      if (body.is_default) {
+        const [existingDefault] = await db
+          .select({ id: warehouses.id })
+          .from(warehouses)
+          .where(and(eq(warehouses.organizationId, ctx.organizationId), eq(warehouses.isDefault, true)))
+          .limit(1);
+        if (existingDefault) throw new ApiError(409, "DEFAULT_WAREHOUSE_EXISTS", "برای هر سازمان فقط یک انبار اصلی مجاز است.");
+      }
       const [wh] = await db
         .insert(warehouses)
         .values({
@@ -159,6 +169,16 @@ export async function handleWarehouseAndInventoryRoutes(
       if (method === "PATCH" && !seg2) {
         await requireOrgContext(req, "inventory.confirm", { requireActiveSubscription: true });
         const body = (await req.json()) as { name?: string; address?: string; is_active?: boolean };
+        if (body.is_active === false && wh.isDefault) {
+          throw new ApiError(422, "DEFAULT_WAREHOUSE_CANNOT_BE_DISABLED", "انبار اصلی سازمان قابل غیرفعال‌سازی نیست.");
+        }
+        if (body.is_active === false && wh.isActive) {
+          const liveStock = await getLiveStockBalances(ctx.organizationId);
+          const hasStock = liveStock.balances.some((balance) => balance.warehouseId === wh.id && Number(balance.onHandQty) !== 0);
+          if (hasStock) {
+            throw new ApiError(409, "WAREHOUSE_HAS_STOCK", "ابتدا موجودی این انبار را با حوالهٔ رسمی به انبار دیگری منتقل کنید.");
+          }
+        }
         const [upd] = await db
           .update(warehouses)
           .set({
@@ -172,6 +192,14 @@ export async function handleWarehouseAndInventoryRoutes(
       }
       if (method === "DELETE" && !seg2) {
         await requireOrgContext(req, "inventory.confirm", { requireActiveSubscription: true });
+        if (wh.isDefault) {
+          throw new ApiError(422, "DEFAULT_WAREHOUSE_CANNOT_BE_DISABLED", "انبار اصلی سازمان قابل غیرفعال‌سازی نیست.");
+        }
+        const liveStock = await getLiveStockBalances(ctx.organizationId);
+        const hasStock = liveStock.balances.some((balance) => balance.warehouseId === wh.id && Number(balance.onHandQty) !== 0);
+        if (hasStock) {
+          throw new ApiError(409, "WAREHOUSE_HAS_STOCK", "ابتدا موجودی این انبار را با حوالهٔ رسمی به انبار دیگری منتقل کنید.");
+        }
         const [upd] = await db
           .update(warehouses)
           .set({ isActive: false })
@@ -333,6 +361,18 @@ export async function handleWarehouseAndInventoryRoutes(
     if (method === "GET" && seg1 === "movements") {
       const ctx = await requireOrgContext(req, "inventory.view");
       const q = parseListQuery(req);
+      const search = req.nextUrl.searchParams;
+      const movementConditions = [eq(stockLedger.organizationId, ctx.organizationId)];
+      const warehouseId = search.get("warehouse_id");
+      const productId = search.get("product_id");
+      const dateFrom = search.get("date_from");
+      const dateTo = search.get("date_to");
+      const movementType = search.get("movement_type");
+      if (warehouseId) movementConditions.push(eq(stockLedger.warehouseId, warehouseId));
+      if (productId) movementConditions.push(eq(stockLedger.productId, productId));
+      if (dateFrom) movementConditions.push(gte(stockLedger.movementDate, resolveCanonicalDate(dateFrom)));
+      if (dateTo) movementConditions.push(lte(stockLedger.movementDate, resolveCanonicalDate(dateTo)));
+      if (movementType) movementConditions.push(eq(stockLedger.movementType, movementType.toUpperCase()));
       const rows = await db
         .select({
           id: stockLedger.id,
@@ -342,8 +382,11 @@ export async function handleWarehouseAndInventoryRoutes(
           warehouseId: stockLedger.warehouseId,
           warehouseName: warehouses.name,
           productId: stockLedger.productId,
+          variantId: stockLedger.variantId,
           productSku: products.sku,
           productName: products.name,
+          variantName: productVariants.variantName,
+          variantSku: productVariants.sku,
           movementType: stockLedger.movementType,
           reason: stockLedger.reason,
           quantityDelta: stockLedger.quantityDelta,
@@ -358,7 +401,8 @@ export async function handleWarehouseAndInventoryRoutes(
         .innerJoin(stockDocuments, eq(stockLedger.stockDocumentId, stockDocuments.id))
         .innerJoin(warehouses, eq(stockLedger.warehouseId, warehouses.id))
         .innerJoin(products, eq(stockLedger.productId, products.id))
-        .where(eq(stockLedger.organizationId, ctx.organizationId))
+        .leftJoin(productVariants, eq(stockLedger.variantId, productVariants.id))
+        .where(and(...movementConditions))
         .orderBy(desc(stockLedger.createdAt))
         .limit(200);
       const { items, total } = applyListFilterAndPaginate(rows, q, ["documentNumber", "productName", "warehouseName"]);
@@ -471,6 +515,7 @@ export async function handleWarehouseAndInventoryRoutes(
             actorUserId: ctx.userId,
             items: body.items.map((it) => ({
               productId: it.product_id,
+              variantId: it.variant_id ?? null,
               direction,
               quantity: it.quantity,
               unitCost: it.unit_cost,
@@ -491,19 +536,33 @@ export async function handleWarehouseAndInventoryRoutes(
 
         if (method === "GET" && !seg3) {
           const items = await db
-            .select()
+            .select({
+              id: stockDocumentItems.id,
+              stockDocumentId: stockDocumentItems.stockDocumentId,
+              productId: stockDocumentItems.productId,
+              variantId: stockDocumentItems.variantId,
+              quantity: stockDocumentItems.quantity,
+              unitCost: stockDocumentItems.unitCost,
+              lineTotal: stockDocumentItems.totalCost,
+              productName: products.name,
+              productSku: products.sku,
+              variantName: productVariants.variantName,
+              variantSku: productVariants.sku,
+            })
             .from(stockDocumentItems)
+            .innerJoin(products, eq(stockDocumentItems.productId, products.id))
+            .leftJoin(productVariants, eq(stockDocumentItems.variantId, productVariants.id))
             .where(eq(stockDocumentItems.stockDocumentId, doc.id));
           return ok({ ...doc, items });
         }
         if (method === "POST" && (seg3 === "confirm" || seg3 === "cancel")) {
-          const nextStatus = seg3 === "confirm" ? "CONFIRMED" : "CANCELLED";
-          const [upd] = await db
-            .update(stockDocuments)
-            .set({ status: nextStatus })
-            .where(eq(stockDocuments.id, doc.id))
-            .returning();
-          return ok(upd);
+          throw new ApiError(
+            409,
+            "POSTED_STOCK_DOCUMENT_IMMUTABLE",
+            seg3 === "cancel"
+              ? "سند قطعی انبار را نمی‌توان با تغییر وضعیت لغو کرد؛ برای اصلاح، سند معکوس یا تعدیل رسمی صادر کنید."
+              : "سند انبار هنگام ثبت در دفتر گردش قطعی می‌شود و قابل تأیید مجدد نیست."
+          );
         }
       }
     }
@@ -513,7 +572,7 @@ export async function handleWarehouseAndInventoryRoutes(
       if (method === "GET" && !seg2) {
         const ctx = await requireOrgContext(req, "inventory.view");
         const q = parseListQuery(req);
-        const [list, whs, prods] = await Promise.all([
+        const [list, whs, prods, variants] = await Promise.all([
           db
             .select()
             .from(stockTransfers)
@@ -521,9 +580,11 @@ export async function handleWarehouseAndInventoryRoutes(
             .orderBy(desc(stockTransfers.createdAt)),
           db.select().from(warehouses).where(eq(warehouses.organizationId, ctx.organizationId)),
           db.select().from(products).where(eq(products.organizationId, ctx.organizationId)),
+          db.select().from(productVariants).where(eq(productVariants.organizationId, ctx.organizationId)),
         ]);
         const whMap = new Map(whs.map((w) => [w.id, w.name]));
         const pMap = new Map(prods.map((p) => [p.id, p.name]));
+        const vMap = new Map(variants.map((v) => [v.id, v]));
         const allTrItems = await db
           .select()
           .from(stockTransferItems)
@@ -536,7 +597,12 @@ export async function handleWarehouseAndInventoryRoutes(
           product_name: t.productId ? pMap.get(t.productId) ?? "" : "چند قلم کالا",
           items: allTrItems
             .filter((i) => i.stockTransferId === t.id)
-            .map((i) => ({ ...i, product_name: pMap.get(i.productId) ?? "" })),
+            .map((i) => ({
+              ...i,
+              product_name: pMap.get(i.productId) ?? "",
+              variant_name: i.variantId ? vMap.get(i.variantId)?.variantName ?? "" : "",
+              variant_sku: i.variantId ? vMap.get(i.variantId)?.sku ?? "" : "",
+            })),
         }));
         const { items, total } = applyListFilterAndPaginate(enriched, q, ["transferNumber", "product_name"]);
         return okList(items, { page: q.page, perPage: q.perPage, total });

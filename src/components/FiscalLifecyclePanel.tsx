@@ -18,6 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { apiFetch, formatIrr } from "@/lib/format";
+import { JalaliDatePicker } from "@/components/JalaliDatePicker";
 
 interface FiscalLifecyclePanelProps {
   orgId: string | null;
@@ -51,8 +52,8 @@ export function FiscalLifecyclePanel({ orgId, onToast }: FiscalLifecyclePanelPro
   const [fiscalYearsList, setFiscalYearsList] = useState<Array<Record<string, unknown>>>([]);
   const [openingFyId, setOpeningFyId] = useState("");
   const [openingLines, setOpeningLines] = useState([
-    { account_id: "", debit: "10000000.00", credit: "0.00", description: "مانده اول دوره" },
-    { account_id: "", debit: "0.00", credit: "10000000.00", description: "سرمایه افتتاحیه" },
+    { account_id: "", debit: "", credit: "", description: "مانده اول دوره" },
+    { account_id: "", debit: "", credit: "", description: "سرمایه افتتاحیه" },
   ]);
 
   // Fiscal Year Lifecycle state
@@ -60,9 +61,9 @@ export function FiscalLifecyclePanel({ orgId, onToast }: FiscalLifecyclePanelPro
   const [checklist, setChecklist] = useState<Record<string, unknown> | null>(null);
   const [closingPreview, setClosingPreview] = useState<Record<string, unknown> | null>(null);
   const [newFyForm, setNewFyForm] = useState({
-    name: "سال مالی ۱۴۰۵",
-    start_date: "2026-03-21",
-    end_date: "2027-03-20",
+    name: "",
+    start_date: "",
+    end_date: "",
     calendar_system: "PERSIAN",
   });
   const [reopenReason, setReopenReason] = useState("");
@@ -97,8 +98,8 @@ export function FiscalLifecyclePanel({ orgId, onToast }: FiscalLifecyclePanelPro
       if (coaRes.accounts.length >= 2 && !openingLines[0].account_id) {
         const capAcc = coaRes.accounts.find((a) => a.system_role === "CAPITAL") ?? coaRes.accounts[1];
         setOpeningLines([
-          { account_id: String(coaRes.accounts[0].id), debit: "10000000.00", credit: "0.00", description: "مانده اول دوره" },
-          { account_id: String(capAcc.id), debit: "0.00", credit: "10000000.00", description: "سرمایه اول دوره" },
+          { account_id: String(coaRes.accounts[0].id), debit: "", credit: "", description: "مانده اول دوره" },
+          { account_id: String(capAcc.id), debit: "", credit: "", description: "سرمایه اول دوره" },
         ]);
       }
     } catch (e) {
@@ -611,19 +612,17 @@ export function FiscalLifecyclePanel({ orgId, onToast }: FiscalLifecyclePanelPro
               onChange={(e) => setNewFyForm({ ...newFyForm, name: e.target.value })}
               className="glass-input px-3 py-2"
             />
-            <input
-              dir="ltr"
-              type="date"
+            <JalaliDatePicker
               value={newFyForm.start_date}
-              onChange={(e) => setNewFyForm({ ...newFyForm, start_date: e.target.value })}
-              className="glass-input px-3 py-2 font-mono"
+              onChange={(value) => setNewFyForm({ ...newFyForm, start_date: value })}
+              format="iso"
+              placeholder="شروع سال مالی"
             />
-            <input
-              dir="ltr"
-              type="date"
+            <JalaliDatePicker
               value={newFyForm.end_date}
-              onChange={(e) => setNewFyForm({ ...newFyForm, end_date: e.target.value })}
-              className="glass-input px-3 py-2 font-mono"
+              onChange={(value) => setNewFyForm({ ...newFyForm, end_date: value })}
+              format="iso"
+              placeholder="پایان سال مالی"
             />
             <select
               value={newFyForm.calendar_system}
