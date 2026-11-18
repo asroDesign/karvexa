@@ -336,6 +336,12 @@ export async function handleCloudMigrationRoutes(
       .where(and(eq(cloudMigrationSessions.id, seg0), eq(cloudMigrationSessions.organizationId, ctx.organizationId)))
       .limit(1);
     if (!mig) throw new ApiError(404, "MIGRATION_SESSION_NOT_FOUND", "جلسه مهاجرت ابری یافت نشد.");
+    if (mig.conflictRecords > 0) {
+      throw new ApiError(409, "MIGRATION_CONFLICTS_UNRESOLVED", "تا زمان رفع تعارض‌های مهاجرت، فعال‌سازی همگام‌سازی ابری مجاز نیست.");
+    }
+    if (mig.status === "COMPLETED") {
+      throw new ApiError(409, "MIGRATION_ALREADY_COMPLETED", "این مهاجرت ابری قبلاً تکمیل شده است.");
+    }
 
     const now = new Date();
     const [completed] = await db

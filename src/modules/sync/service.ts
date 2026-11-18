@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  accounts,
   chequeEvents,
   cheques,
   contacts,
@@ -22,12 +23,14 @@ import {
   syncEvents,
   syncInbox,
   syncLogs,
+  stockTransfers,
+  stockTransferItems,
   units,
   warehouses,
 } from "@/db/schema";
 import { sha256 } from "@/lib/auth";
 import { recordAuditLog } from "@/lib/audit";
-import { addDec, formatDecimal, mulDec, subDec } from "@/lib/decimal";
+import { addDec, formatDecimal, mulDec, parseDecimal, subDec } from "@/lib/decimal";
 import { ApiError } from "@/lib/errors";
 import { withTenantTransaction } from "@/lib/tenant";
 import { createJournalEntryTx } from "@/modules/accounting/service";
@@ -35,7 +38,7 @@ import {
   finalizePurchaseInvoice,
   finalizeSalesInvoice,
 } from "@/modules/commerce/service";
-import { approveStockCount } from "@/modules/inventory/service";
+import { approveStockCount, postStockDocumentTx } from "@/modules/inventory/service";
 import {
   appendSyncChangeLog,
   decodeSyncCursor,
@@ -77,6 +80,7 @@ function normalizeEntityType(raw: string): string {
   if (s === "purchase_invoice" || s === "purchases") return "purchase";
   if (s === "sales_invoice" || s === "sale") return "sales";
   if (s === "journal") return "journal_entry";
+  if (s === "catalog_item") return "product";
   if (s === "treasury_transaction") return "financial_transaction";
   return s;
 }
@@ -1283,8 +1287,39 @@ async function processSingleSyncEvent(params: {
     }
 
     if (operation === "CREATE") {
-      const lines = (p.lines as Array<{ account_id: string; debit: string; credit: string; description?: string }>) ?? [];
+      const lines = (p.lines as Array<{
+        account_id?: string;
+        account_code?: string;
+        debit: string;
+        credit: string;
+        description?: string;
+      }>) ?? [];
       const created = await withTenantTransaction(organizationId, async (tx) => {
+        const resolvedLines = [];
+        for (const line of lines) {
+          let accountId = line.account_id;
+          if (!isUuid(accountId) && line.account_code) {
+            const [account] = await tx
+              .select({ id: accounts.id })
+              .from(accounts)
+              .where(and(eq(accounts.organizationId, organizationId), eq(accounts.code, line.account_code)))
+              .limit(1);
+            accountId = account?.id;
+          }
+          if (!isUuid(accountId)) {
+            throw new ApiError(
+              422,
+              "ACCOUNT_NOT_FOUND",
+              "حساب با کد " + String(line.account_code ?? "") + " در سرور همگام نشده است."
+            );
+          }
+          resolvedLines.push({
+            accountId,
+            debit: line.debit,
+            credit: line.credit,
+            description: line.description,
+          });
+        }
         const res = await createJournalEntryTx(tx, {
           organizationId,
           actorUserId: params.userId,
@@ -1292,12 +1327,7 @@ async function processSingleSyncEvent(params: {
           entryDate: String(p.document_date || new Date().toISOString().slice(0, 10)),
           description: String(p.description || "پیش‌نویس سند آفلاین"),
           postImmediately: false, // Prompt 04 §14: No final journal approval offline!
-          lines: lines.map((l) => ({
-            accountId: l.account_id,
-            debit: l.debit,
-            credit: l.credit,
-            description: l.description,
-          })),
+          lines: resolvedLines,
         });
         await appendSyncChangeLog(tx, {
           organizationId,
@@ -1351,6 +1381,132 @@ async function processSingleSyncEvent(params: {
       business_status: "CONFIRMED",
       error: null,
     };
+  }
+
+  if (entityType === "inventory_document" && operation === "CREATE") {
+    const documentType = String(p.document_type || "").toUpperCase();
+    const warehouseId = String(p.warehouse_id || p.source_warehouse_id || "");
+    const documentDate = String(p.document_date || new Date().toISOString().slice(0, 10));
+    const documentNumber = String(p.document_number || ("INV-" + Date.now().toString().slice(-7)));
+    const reason = String(p.description || p.reference_number || "سند انبار آفلاین اندروید");
+    const items = (p.items as Array<{ product_id: string; variant_id?: string | null; quantity: string; unit_cost?: string }>) ?? [];
+    if (!isUuid(warehouseId) || items.length === 0) {
+      throw new ApiError(422, "VALIDATION_ERROR", "اطلاعات سند انبار آفلاین (warehouse_id, items) ناقص است.");
+    }
+
+    if (documentType === "RECEIPT" || documentType === "ISSUE") {
+      const posted = await withTenantTransaction(organizationId, (tx) =>
+        postStockDocumentTx(tx, {
+          organizationId,
+          warehouseId,
+          documentType: documentType === "RECEIPT" ? "RECEIPT" : "ISSUE",
+          documentDate,
+          reason,
+          referenceType: "ANDROID_INVENTORY_DOCUMENT",
+          referenceId: clientUuid,
+          actorUserId: params.userId,
+          items: items.map((item) => ({
+            productId: item.product_id,
+            direction: documentType === "RECEIPT" ? "IN" : "OUT",
+            quantity: item.quantity,
+            ...(item.unit_cost ? { unitCost: item.unit_cost } : {}),
+          })),
+        })
+      );
+      return {
+        event_id: ev.event_id,
+        entity_id: clientUuid,
+        server_id: posted.document.id,
+        status: "CONFIRMED",
+        entity_version: 1,
+        business_status: "CONFIRMED",
+        error: null,
+      };
+    }
+
+    if (documentType === "TRANSFER") {
+      const targetWarehouseId = String(p.destination_warehouse_id || p.target_warehouse_id || "");
+      if (!isUuid(targetWarehouseId) || targetWarehouseId === warehouseId) {
+        throw new ApiError(422, "TRANSFER_WAREHOUSES_INVALID", "انبار مبدأ و مقصد انتقال معتبر نیستند.");
+      }
+      // An offline sync event creates a server draft only. Stock is moved to
+      // transit at the explicit dispatch action and enters the destination
+      // only when that warehouse accepts the received quantities.
+      const transferResult = await withTenantTransaction(organizationId, async (tx) => {
+        const [source] = await tx.select().from(warehouses)
+          .where(and(eq(warehouses.id, warehouseId), eq(warehouses.organizationId, organizationId))).limit(1);
+        const [target] = await tx.select().from(warehouses)
+          .where(and(eq(warehouses.id, targetWarehouseId), eq(warehouses.organizationId, organizationId))).limit(1);
+        if (!source || !target) throw new ApiError(422, "TRANSFER_WAREHOUSES_INVALID", "انبار مبدأ یا مقصد متعلق به این سازمان نیست.");
+
+        const productIds = [...new Set(items.map((item) => item.product_id))];
+        if (items.some((item) => !isUuid(item.product_id))) throw new ApiError(422, "TRANSFER_PRODUCT_INVALID", "شناسه یکی از کالاهای انتقال معتبر نیست.");
+        const orgProducts = await tx.select({ id: products.id }).from(products)
+          .where(and(eq(products.organizationId, organizationId), inArray(products.id, productIds)));
+        if (orgProducts.length !== productIds.length) throw new ApiError(422, "TRANSFER_PRODUCT_INVALID", "یکی از کالاها متعلق به این سازمان نیست.");
+
+        const grouped = new Map<string, { productId: string; variantId: string | null; quantity: bigint }>();
+        for (const item of items) {
+          const quantity = parseDecimal(item.quantity);
+          if (quantity <= BigInt(0)) throw new ApiError(422, "TRANSFER_QUANTITY_INVALID", "مقدار انتقال باید بزرگ‌تر از صفر باشد.");
+          const variantId = isUuid(item.variant_id) ? item.variant_id : null;
+          const key = `${item.product_id}:${variantId ?? ""}`;
+          const existing = grouped.get(key);
+          grouped.set(key, {
+            productId: item.product_id,
+            variantId,
+            quantity: addDec(existing?.quantity ?? BigInt(0), quantity),
+          });
+        }
+        const transferItems = [...grouped.values()];
+        const totalQuantity = transferItems.reduce((sum, item) => addDec(sum, item.quantity), BigInt(0));
+        const [transfer] = await tx.insert(stockTransfers).values({
+          id: clientUuid,
+          organizationId,
+          transferNumber: `${documentNumber}-${clientUuid.slice(0, 8)}`.slice(0, 48),
+          sourceWarehouseId: warehouseId,
+          targetWarehouseId,
+          productId: transferItems[0]?.productId ?? null,
+          quantity: formatDecimal(totalQuantity, 4),
+          reason,
+          sourceResponsibleName: String(p.source_responsible_name || "مسئول انبار مبدأ"),
+          destinationResponsibleName: String(p.destination_responsible_name || "مسئول انبار مقصد"),
+          transferDate: documentDate,
+          notes: p.description ? String(p.description) : null,
+          status: "DRAFT",
+          createdBy: params.userId,
+        }).returning();
+        await tx.insert(stockTransferItems).values(transferItems.map((item) => ({
+          organizationId,
+          stockTransferId: transfer.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantitySent: formatDecimal(item.quantity, 4),
+          itemStatus: "PENDING",
+        })));
+        await appendSyncChangeLog(tx, {
+          organizationId,
+          entityType: "stock_transfer",
+          entityId: transfer.id,
+          operation: "UPSERT",
+          version: 1,
+          sourceDeviceId: deviceId,
+          payload: { id: transfer.id, transfer_number: transfer.transferNumber, status: transfer.status },
+        });
+        return transfer;
+      });
+      return {
+        event_id: ev.event_id,
+        entity_id: clientUuid,
+        server_id: transferResult.id,
+        status: "ACCEPTED",
+        entity_version: 1,
+        business_status: "DRAFT",
+        error: null,
+      };
+    }
+
+    throw new ApiError(422, "SYNC_ENTITY_UNSUPPORTED", "نوع سند انبار آفلاین پشتیبانی نمی‌شود.");
   }
 
   if (entityType === "cheque" && operation === "CREATE") {

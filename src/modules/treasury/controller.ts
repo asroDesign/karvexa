@@ -1,20 +1,26 @@
 import { NextRequest } from "next/server";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
 import {
   accounts,
+  accountingCategories,
+  categoryAccountMappings,
   chequeEvents,
   cheques,
   contacts,
+  contactTransactions,
   financialAccounts,
   financialTransactions,
+  idempotencyKeys,
   invoicePaymentAllocations,
+  organizations,
 } from "@/db/schema";
 import { ensureSeeded } from "@/db/seed";
 import { ensurePrompt05OrgDefaults } from "@/db/seed-prompt05";
 import { recordAuditLog } from "@/lib/audit";
-import { addDec, formatDecimal, isNegativeDec, isPositiveDec, parseDecimal, subDec } from "@/lib/decimal";
+import { sha256 } from "@/lib/auth";
+import { addDec, formatDecimal, gtDec, isNegativeDec, isPositiveDec, parseDecimal, subDec } from "@/lib/decimal";
 import {
   ApiError,
   applyListFilterAndPaginate,
@@ -24,7 +30,7 @@ import {
 } from "@/lib/errors";
 import { gregorianIsoToJalali, resolveCanonicalDate } from "@/lib/jalali";
 import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
-import { createJournalEntryTx } from "@/modules/accounting/service";
+import { createJournalEntryTx, reverseJournalEntryTx } from "@/modules/accounting/service";
 
 const createFinAccountSchema = z.object({
   name: z.string().min(2),
@@ -42,11 +48,13 @@ const treasuryTxSchema = z.object({
   contact_id: z.string().uuid().nullable().optional(),
   amount: z.string().regex(/^\d+(\.\d{1,2})?$/),
   currency: z.string().default("IRR"),
-  transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  transaction_date_jalali: z.string().optional(),
   payment_method: z.enum(["CASH", "BANK_TRANSFER", "CARD", "CHEQUE", "OTHER"]).default("BANK_TRANSFER"),
   reference_number: z.string().optional(),
   related_document_type: z.string().optional(),
   related_document_id: z.string().uuid().optional(),
+  category_id: z.string().uuid().optional(),
   description: z.string().min(2),
 });
 
@@ -102,10 +110,20 @@ export async function handleTreasuryRoutes(
             ? "POS"
             : body.account_type;
 
+      await ensurePrompt05OrgDefaults(ctx.organizationId);
       const created = await withTenantTransaction(ctx.organizationId, async (tx) => {
+        const [org] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, ctx.organizationId)).limit(1);
+        if (!org) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
+        if (isPositiveDec(parseDecimal(body.opening_balance)) && body.currency !== org.baseCurrency) {
+          throw new ApiError(422, "FOREIGN_CURRENCY_OPENING_BALANCE_UNSUPPORTED", `مانده افتتاحیه باید به ارز پایه ${org.baseCurrency} ثبت شود؛ تسعیر حساب ارزی هنوز فعال نیست.`);
+        }
         const orgAccs = await tx.select().from(accounts).where(eq(accounts.organizationId, ctx.organizationId));
         const glAcc = orgAccs.find((a) => a.systemRole === (normType === "CASHBOX" ? "CASH" : "BANK"));
         const capAcc = orgAccs.find((a) => a.systemRole === "CAPITAL");
+
+        if (isPositiveDec(parseDecimal(body.opening_balance)) && (!glAcc || !capAcc)) {
+          throw new ApiError(422, "OPENING_BALANCE_ACCOUNTS_MISSING", "برای افتتاح حساب با مانده اولیه، حساب خزانه و سرمایه باید در کدینگ فعال باشند.");
+        }
 
         const [finAcc] = await tx
           .insert(financialAccounts)
@@ -320,13 +338,123 @@ export async function handleTreasuryRoutes(
       return ok(tx);
     }
     if (method === "POST" && id && action === "cancel") {
-      await requireOrgContext(req, "treasury.create", { requireActiveSubscription: true });
-      const [cancelled] = await db
-        .update(financialTransactions)
-        .set({ status: "CANCELLED" })
-        .where(and(eq(financialTransactions.id, id), eq(financialTransactions.organizationId, ctx.organizationId)))
-        .returning();
-      return ok(cancelled);
+      const cancelCtx = await requireOrgContext(req, "treasury.create", { requireActiveSubscription: true });
+      const body = z.object({
+        reason: z.string().min(3).max(500).optional(),
+        reversal_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        reversal_date_jalali: z.string().optional(),
+        accounting_period_id: z.string().uuid().optional(),
+      }).parse(await req.json().catch(() => ({})));
+      const result = await withTenantTransaction(cancelCtx.organizationId, async (tx) => {
+        await tx.execute(sql`
+          SELECT id FROM financial_transactions
+          WHERE id = ${id} AND organization_id = ${cancelCtx.organizationId}
+          FOR UPDATE
+        `);
+        const [transaction] = await tx.select().from(financialTransactions).where(and(
+          eq(financialTransactions.id, id),
+          eq(financialTransactions.organizationId, cancelCtx.organizationId)
+        )).limit(1);
+        if (!transaction) throw new ApiError(404, "TRANSACTION_NOT_FOUND", "تراکنش خزانه یافت نشد.");
+        if (transaction.status === "CANCELLED") return { transaction, reversalJournalEntryId: null, replayed: true };
+        if (transaction.status !== "CONFIRMED") throw new ApiError(409, "TRANSACTION_NOT_CANCELLABLE", "وضعیت این تراکنش اجازه ابطال نمی‌دهد.");
+        if (["SALES_INVOICE", "PURCHASE_INVOICE", "SUPPLIER_SETTLEMENT", "WAREHOUSE_RECEIPT"].includes((transaction.relatedDocumentType ?? "").toUpperCase())) {
+          throw new ApiError(409, "DOCUMENT_SETTLEMENT_CANNOT_CANCEL_HERE", "این تراکنش به سند فروش/خرید متصل است؛ اصلاح را از همان فاکتور یا گردش چک انجام دهید.");
+        }
+        if (!transaction.journalEntryId) {
+          throw new ApiError(409, "UNJOURNALED_TREASURY_TRANSACTION", "برای این تراکنش سند حسابداری وجود ندارد؛ ابتدا گردش تاریخی را تطبیق و اصلاح کنید.");
+        }
+
+        const accountIds = [...new Set([transaction.financialAccountId, transaction.destinationAccountId].filter((v): v is string => Boolean(v)))].sort();
+        for (const accountId of accountIds) {
+          await tx.execute(sql`
+            SELECT id FROM financial_accounts
+            WHERE id = ${accountId} AND organization_id = ${cancelCtx.organizationId}
+            FOR UPDATE
+          `);
+        }
+        const [source] = await tx.select().from(financialAccounts).where(and(
+          eq(financialAccounts.id, transaction.financialAccountId),
+          eq(financialAccounts.organizationId, cancelCtx.organizationId)
+        )).limit(1);
+        if (!source) throw new ApiError(409, "TREASURY_ACCOUNT_MISSING", "حساب مبدأ تراکنش دیگر در دسترس نیست.");
+        let destination: typeof financialAccounts.$inferSelect | null = null;
+        if (transaction.txType === "TRANSFER") {
+          if (!transaction.destinationAccountId) throw new ApiError(409, "TRANSFER_DESTINATION_MISSING", "حساب مقصد انتقال ثبت نشده است.");
+          const [found] = await tx.select().from(financialAccounts).where(and(
+            eq(financialAccounts.id, transaction.destinationAccountId),
+            eq(financialAccounts.organizationId, cancelCtx.organizationId)
+          )).limit(1);
+          if (!found) throw new ApiError(409, "TRANSFER_DESTINATION_MISSING", "حساب مقصد انتقال دیگر در دسترس نیست.");
+          destination = found;
+        }
+
+        const reversal = await reverseJournalEntryTx(tx, {
+          organizationId: cancelCtx.organizationId,
+          journalEntryId: transaction.journalEntryId,
+          reason: body.reason ?? `ابطال تراکنش خزانه ${transaction.id}`,
+          reversalDate: body.reversal_date || body.reversal_date_jalali
+            ? resolveCanonicalDate(body.reversal_date, body.reversal_date_jalali)
+            : undefined,
+          accountingPeriodId: body.accounting_period_id,
+          actorUserId: cancelCtx.userId,
+          actorEmail: cancelCtx.email,
+        });
+
+        const amount = parseDecimal(transaction.amount);
+        let sourceBalance = parseDecimal(source.balance);
+        let destinationBalance = destination ? parseDecimal(destination.balance) : null;
+        if (transaction.txType === "RECEIPT" || transaction.txType === "INCOME") sourceBalance = subDec(sourceBalance, amount);
+        else if (transaction.txType === "PAYMENT" || transaction.txType === "EXPENSE") sourceBalance = addDec(sourceBalance, amount);
+        else if (transaction.txType === "TRANSFER" && destinationBalance !== null) {
+          sourceBalance = addDec(sourceBalance, amount);
+          destinationBalance = subDec(destinationBalance, amount);
+        } else throw new ApiError(409, "TRANSACTION_TYPE_UNSUPPORTED", "نوع تراکنش قابل ابطال نیست.");
+
+        await tx.update(financialAccounts).set({
+          balance: formatDecimal(sourceBalance, 2), version: source.version + 1, updatedAt: new Date(),
+        }).where(and(eq(financialAccounts.id, source.id), eq(financialAccounts.version, source.version)));
+        if (destination && destinationBalance !== null) {
+          await tx.update(financialAccounts).set({
+            balance: formatDecimal(destinationBalance, 2), version: destination.version + 1, updatedAt: new Date(),
+          }).where(and(eq(financialAccounts.id, destination.id), eq(financialAccounts.version, destination.version)));
+        }
+        if (transaction.contactId && (transaction.txType === "RECEIPT" || transaction.txType === "PAYMENT")) {
+          await tx.insert(contactTransactions).values({
+            organizationId: cancelCtx.organizationId,
+            contactId: transaction.contactId,
+            referenceType: "TREASURY_REVERSAL",
+            referenceId: transaction.id,
+            txDate: reversal.reversal.entryDate,
+            debit: transaction.txType === "RECEIPT" ? transaction.amount : "0.00",
+            credit: transaction.txType === "PAYMENT" ? transaction.amount : "0.00",
+            description: `ابطال تراکنش خزانه ${transaction.id}`,
+          });
+        }
+        const [cancelled] = await tx.update(financialTransactions).set({
+          status: "CANCELLED", version: transaction.version + 1, updatedAt: new Date(),
+        }).where(and(
+          eq(financialTransactions.id, transaction.id),
+          eq(financialTransactions.status, "CONFIRMED"),
+          eq(financialTransactions.version, transaction.version)
+        )).returning();
+        if (!cancelled) throw new ApiError(409, "TRANSACTION_CHANGED", "تراکنش هم‌زمان تغییر کرده است؛ دوباره بارگیری کنید.");
+        return { transaction: cancelled, reversalJournalEntryId: reversal.reversal.id, replayed: false };
+      });
+      if (!result.replayed) {
+        await recordAuditLog({
+          organizationId: cancelCtx.organizationId,
+          actorUserId: cancelCtx.userId,
+          actorEmail: cancelCtx.email,
+          scope: "ORGANIZATION",
+          action: "TREASURY_TRANSACTION_CANCELLED",
+          entityType: "FINANCIAL_TRANSACTION",
+          entityId: result.transaction.id,
+          ipAddress: cancelCtx.ipAddress,
+          metadata: { reversalJournalEntryId: result.reversalJournalEntryId, reason: body.reason ?? null },
+        });
+      }
+      return ok(result.transaction, 200, result.replayed ? { replayed: true } : undefined);
     }
   }
 
@@ -341,77 +469,259 @@ export async function handleTreasuryRoutes(
   if (method === "POST" && sub && txTypeMap[sub]) {
     const ctx = await requireOrgContext(req, "treasury.create", { requireActiveSubscription: true });
     const body = treasuryTxSchema.parse(await req.json());
+    if (body.payment_method === "CHEQUE") {
+      throw new ApiError(422, "USE_CHEQUE_WORKFLOW", "برای ثبت چک از گردش چک‌ها یا تسویه فاکتور با اطلاعات چک استفاده کنید.");
+    }
+    const transactionDate = resolveCanonicalDate(body.transaction_date, body.transaction_date_jalali);
     const meta = txTypeMap[sub];
+    if (!isPositiveDec(parseDecimal(body.amount))) {
+      throw new ApiError(422, "AMOUNT_INVALID", "مبلغ تراکنش باید بزرگ‌تر از صفر باشد.");
+    }
+    const idemKey = req.headers.get("idempotency-key");
+    if (idemKey && idemKey.length > 160) throw new ApiError(400, "IDEMPOTENCY_KEY_TOO_LONG", "طول کلید تکرار مجاز نیست.");
+    const endpoint = `/api/v1/treasury/${sub}`;
+    const requestHash = sha256(JSON.stringify(body));
+    await ensurePrompt05OrgDefaults(ctx.organizationId);
 
-    const created = await withTenantTransaction(ctx.organizationId, async (tx) => {
+    const result = await withTenantTransaction(ctx.organizationId, async (tx) => {
+      if (idemKey) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${ctx.organizationId}:${idemKey}`}))`);
+        const [existing] = await tx
+          .select()
+          .from(idempotencyKeys)
+          .where(and(eq(idempotencyKeys.organizationId, ctx.organizationId), eq(idempotencyKeys.key, idemKey)))
+          .limit(1);
+        if (existing && existing.expiresAt > new Date()) {
+          if (existing.requestHash !== requestHash || existing.endpoint !== endpoint) {
+            throw new ApiError(409, "IDEMPOTENCY_PAYLOAD_MISMATCH", "کلید تکرار قبلاً برای درخواست دیگری استفاده شده است.");
+          }
+          return { transaction: existing.responseBody, replayed: true };
+        }
+        if (existing) {
+          await tx.delete(idempotencyKeys).where(eq(idempotencyKeys.id, existing.id));
+        }
+      }
+
+      if (meta.sign === "TRANSFER" && !body.destination_account_id) {
+        throw new ApiError(422, "DESTINATION_ACCOUNT_REQUIRED", "شناسه حساب مقصد برای انتقال الزامی است.");
+      }
+      if (meta.sign !== "TRANSFER" && body.destination_account_id) {
+        throw new ApiError(422, "DESTINATION_ACCOUNT_NOT_ALLOWED", "حساب مقصد فقط برای انتقال بین حساب‌ها استفاده می‌شود.");
+      }
+      if (meta.sign === "TRANSFER" && body.destination_account_id === body.account_id) {
+        throw new ApiError(422, "SAME_TRANSFER_ACCOUNT", "حساب مبدأ و مقصد انتقال باید متفاوت باشند.");
+      }
+
+      const lockedAccountIds = [...new Set([body.account_id, body.destination_account_id].filter((v): v is string => Boolean(v)))].sort();
+      for (const accountId of lockedAccountIds) {
+        await tx.execute(sql`
+          SELECT id FROM financial_accounts
+          WHERE id = ${accountId} AND organization_id = ${ctx.organizationId}
+          FOR UPDATE
+        `);
+      }
       const [src] = await tx
         .select()
         .from(financialAccounts)
         .where(and(eq(financialAccounts.id, body.account_id), eq(financialAccounts.organizationId, ctx.organizationId)))
         .limit(1);
       if (!src) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب خزانه مبدأ یافت نشد.");
+      if (!src.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", "حساب خزانه مبدأ غیرفعال است.");
+      if (src.currency !== body.currency) throw new ApiError(422, "CURRENCY_MISMATCH", "ارز تراکنش با ارز حساب خزانه مبدأ یکسان نیست.");
+      const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, ctx.organizationId)).limit(1);
+      if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
+      if (body.currency !== organization.baseCurrency || src.currency !== organization.baseCurrency) {
+        throw new ApiError(422, "FOREIGN_CURRENCY_POSTING_UNSUPPORTED", `ثبت خزانه فقط با ارز پایه ${organization.baseCurrency} ممکن است؛ تسعیر چندارزی هنوز پیاده‌سازی نشده است.`);
+      }
 
-      if (meta.sign === "TRANSFER") {
-        if (!body.destination_account_id) {
-          throw new ApiError(422, "VALIDATION_ERROR", "شناسه حساب مقصد (destination_account_id) الزامی است.");
-        }
-        const [dst] = await tx
+      let dst: typeof financialAccounts.$inferSelect | null = null;
+      if (body.destination_account_id) {
+        const [destination] = await tx
           .select()
           .from(financialAccounts)
           .where(and(eq(financialAccounts.id, body.destination_account_id), eq(financialAccounts.organizationId, ctx.organizationId)))
           .limit(1);
-        if (!dst) throw new ApiError(404, "DEST_ACCOUNT_NOT_FOUND", "حساب مقصد یافت نشد.");
-        await tx
-          .update(financialAccounts)
-          .set({ balance: formatDecimal(subDec(src.balance, body.amount), 2) })
-          .where(eq(financialAccounts.id, src.id));
-        await tx
-          .update(financialAccounts)
-          .set({ balance: formatDecimal(addDec(dst.balance, body.amount), 2) })
-          .where(eq(financialAccounts.id, dst.id));
-      } else {
-        const nextBal =
-          meta.sign === "IN" ? addDec(src.balance, body.amount) : subDec(src.balance, body.amount);
-        await tx
-          .update(financialAccounts)
-          .set({ balance: formatDecimal(nextBal, 2) })
-          .where(eq(financialAccounts.id, src.id));
+        if (!destination) throw new ApiError(404, "DEST_ACCOUNT_NOT_FOUND", "حساب خزانه مقصد یافت نشد.");
+        if (!destination.isActive) throw new ApiError(409, "DEST_ACCOUNT_INACTIVE", "حساب خزانه مقصد غیرفعال است.");
+        if (destination.currency !== src.currency || body.currency !== src.currency) {
+          throw new ApiError(422, "TRANSFER_CURRENCY_MISMATCH", "انتقال ارزی بین حساب‌های با ارز متفاوت مجاز نیست.");
+        }
+        dst = destination;
       }
 
-      const [ftx] = await tx
-        .insert(financialTransactions)
-        .values({
+      const amount = parseDecimal(body.amount);
+      const sourceOutflow = meta.sign === "OUT" || meta.sign === "TRANSFER";
+      if (sourceOutflow && (src.accountType === "CASHBOX" || src.accountType === "CASH") && gtDec(amount, parseDecimal(src.balance))) {
+        throw new ApiError(422, "INSUFFICIENT_CASH_BALANCE", "موجودی صندوق برای این پرداخت کافی نیست.");
+      }
+
+      let contact = null;
+      if (body.contact_id) {
+        const [found] = await tx
+          .select()
+          .from(contacts)
+          .where(and(eq(contacts.id, body.contact_id), eq(contacts.organizationId, ctx.organizationId)))
+          .limit(1);
+        if (!found) throw new ApiError(404, "CONTACT_NOT_FOUND", "طرف‌حساب متعلق به این کسب‌وکار نیست.");
+        contact = found;
+      }
+      if (body.category_id && contact && (meta.type === "RECEIPT" || meta.type === "PAYMENT")) {
+        throw new ApiError(422, "CATEGORY_NOT_ALLOWED_WITH_CONTACT", "برای دریافت یا پرداخت طرف‌حساب‌محور، دسته‌بندی هزینه/درآمد تعیین نکنید.");
+      }
+      if (meta.type === "TRANSFER" && (body.contact_id || body.category_id)) {
+        throw new ApiError(422, "TRANSFER_DIMENSIONS_NOT_ALLOWED", "برای انتقال بین حساب‌ها طرف‌حساب یا دسته‌بندی ثبت نکنید.");
+      }
+
+      const allAccounts = await tx.select().from(accounts).where(eq(accounts.organizationId, ctx.organizationId));
+      const byRole = new Map(allAccounts.filter((a) => a.systemRole).map((a) => [a.systemRole!, a]));
+      const sourceGlId = src.accountId ?? byRole.get(src.accountType === "CASHBOX" || src.accountType === "CASH" ? "CASH" : "BANK")?.id;
+      const destinationGlId = dst?.accountId ?? byRole.get(dst?.accountType === "CASHBOX" || dst?.accountType === "CASH" ? "CASH" : "BANK")?.id;
+      if (!sourceGlId) throw new ApiError(422, "TREASURY_GL_MAPPING_MISSING", "حساب دفتر کل متناظر با حساب خزانه مبدأ تنظیم نشده است.");
+
+      let mappedCategoryAccount: string | null = null;
+      if (body.category_id) {
+        const expectedKind = meta.type === "INCOME" || meta.type === "RECEIPT" ? "INCOME" : "EXPENSE";
+        const [category] = await tx
+          .select()
+          .from(accountingCategories)
+          .where(and(eq(accountingCategories.id, body.category_id), eq(accountingCategories.organizationId, ctx.organizationId)))
+          .limit(1);
+        if (!category || !category.isActive || category.kind !== expectedKind) {
+          throw new ApiError(422, "TREASURY_CATEGORY_INVALID", `دسته‌بندی انتخاب‌شده از نوع ${expectedKind === "INCOME" ? "درآمد" : "هزینه"} فعال نیست.`);
+        }
+        const [mapping] = await tx
+          .select()
+          .from(categoryAccountMappings)
+          .where(and(
+            eq(categoryAccountMappings.organizationId, ctx.organizationId),
+            eq(categoryAccountMappings.categoryId, category.id),
+            eq(categoryAccountMappings.isActive, true)
+          ))
+          .limit(1);
+        if (!mapping) throw new ApiError(422, "CATEGORY_ACCOUNT_MAPPING_MISSING", "برای این دسته‌بندی نگاشت حسابداری تعریف نشده است.");
+        mappedCategoryAccount = expectedKind === "INCOME" ? mapping.creditAccountId : mapping.debitAccountId;
+      }
+
+      const journalLines = [] as Array<{ accountId: string; contactId?: string | null; debit: string; credit: string; description: string }>;
+      if (meta.type === "TRANSFER") {
+        if (!dst || !destinationGlId) throw new ApiError(422, "TREASURY_GL_MAPPING_MISSING", "حساب دفتر کل متناظر با حساب خزانه مقصد تنظیم نشده است.");
+        journalLines.push(
+          { accountId: destinationGlId, debit: body.amount, credit: "0.00", description: `انتقال به ${dst.name}` },
+          { accountId: sourceGlId, debit: "0.00", credit: body.amount, description: `انتقال از ${src.name}` }
+        );
+      } else if (meta.type === "RECEIPT") {
+        const counter = contact ? byRole.get("AR") : (mappedCategoryAccount ? allAccounts.find((a) => a.id === mappedCategoryAccount) : byRole.get("OTHER_INCOME"));
+        if (!counter) throw new ApiError(422, "TREASURY_COUNTER_ACCOUNT_MISSING", "حساب دریافت وجه در کدینگ تنظیم نشده است.");
+        journalLines.push(
+          { accountId: sourceGlId, debit: body.amount, credit: "0.00", description: `دریافت در ${src.name}` },
+          { accountId: counter.id, contactId: contact ? contact.id : null, debit: "0.00", credit: body.amount, description: contact ? `وصول از ${contact.name}` : body.description }
+        );
+      } else if (meta.type === "PAYMENT") {
+        const counter = contact ? byRole.get("AP") : (mappedCategoryAccount ? allAccounts.find((a) => a.id === mappedCategoryAccount) : byRole.get("OPEX"));
+        if (!counter) throw new ApiError(422, "TREASURY_COUNTER_ACCOUNT_MISSING", "حساب پرداخت در کدینگ تنظیم نشده است.");
+        journalLines.push(
+          { accountId: counter.id, contactId: contact ? contact.id : null, debit: body.amount, credit: "0.00", description: contact ? `پرداخت به ${contact.name}` : body.description },
+          { accountId: sourceGlId, debit: "0.00", credit: body.amount, description: `پرداخت از ${src.name}` }
+        );
+      } else if (meta.type === "EXPENSE") {
+        const expense = mappedCategoryAccount ? allAccounts.find((a) => a.id === mappedCategoryAccount) : byRole.get("OPEX");
+        if (!expense) throw new ApiError(422, "TREASURY_COUNTER_ACCOUNT_MISSING", "حساب هزینه در کدینگ تنظیم نشده است.");
+        journalLines.push(
+          { accountId: expense.id, contactId: contact?.id ?? null, debit: body.amount, credit: "0.00", description: body.description },
+          { accountId: sourceGlId, debit: "0.00", credit: body.amount, description: `پرداخت از ${src.name}` }
+        );
+      } else {
+        const income = mappedCategoryAccount ? allAccounts.find((a) => a.id === mappedCategoryAccount) : byRole.get("OTHER_INCOME");
+        if (!income) throw new ApiError(422, "TREASURY_COUNTER_ACCOUNT_MISSING", "حساب درآمد در کدینگ تنظیم نشده است.");
+        journalLines.push(
+          { accountId: sourceGlId, debit: body.amount, credit: "0.00", description: `دریافت در ${src.name}` },
+          { accountId: income.id, contactId: contact?.id ?? null, debit: "0.00", credit: body.amount, description: body.description }
+        );
+      }
+
+      const nextSrcBalance = meta.sign === "IN" ? addDec(src.balance, amount) : subDec(src.balance, amount);
+      const [updatedSrc] = await tx.update(financialAccounts).set({
+        balance: formatDecimal(nextSrcBalance, 2), version: src.version + 1, updatedAt: new Date(),
+      }).where(and(eq(financialAccounts.id, src.id), eq(financialAccounts.version, src.version))).returning({ id: financialAccounts.id });
+      if (!updatedSrc) throw new ApiError(409, "TREASURY_ACCOUNT_CHANGED", "حساب خزانه هم‌زمان تغییر کرده است؛ درخواست را دوباره ارسال کنید.");
+      if (dst) {
+        const [updatedDst] = await tx.update(financialAccounts).set({
+          balance: formatDecimal(addDec(dst.balance, amount), 2), version: dst.version + 1, updatedAt: new Date(),
+        }).where(and(eq(financialAccounts.id, dst.id), eq(financialAccounts.version, dst.version))).returning({ id: financialAccounts.id });
+        if (!updatedDst) throw new ApiError(409, "TREASURY_ACCOUNT_CHANGED", "حساب خزانه مقصد هم‌زمان تغییر کرده است؛ درخواست را دوباره ارسال کنید.");
+      }
+
+      const [ftx] = await tx.insert(financialTransactions).values({
+        organizationId: ctx.organizationId,
+        financialAccountId: src.id,
+        destinationAccountId: dst?.id ?? null,
+        contactId: contact?.id ?? null,
+        txType: meta.type,
+        paymentMethod: body.payment_method,
+        currency: body.currency,
+        amount: formatDecimal(amount, 2),
+        txDate: transactionDate,
+        trackingNumber: body.reference_number ?? null,
+        relatedDocumentType: body.related_document_type ?? null,
+        relatedDocumentId: body.related_document_id ?? null,
+        description: body.description,
+        status: "CONFIRMED",
+        createdBy: ctx.userId,
+      }).returning();
+      const journal = await createJournalEntryTx(tx, {
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        actorEmail: ctx.email,
+        entryDate: transactionDate,
+        description: body.description,
+        referenceType: "TREASURY_TRANSACTION",
+        referenceId: ftx.id,
+        postImmediately: true,
+        lines: journalLines,
+      });
+      const [linkedTx] = await tx.update(financialTransactions).set({ journalEntryId: journal.entry.id, version: ftx.version + 1, updatedAt: new Date() }).where(eq(financialTransactions.id, ftx.id)).returning();
+
+      if (contact && (meta.type === "RECEIPT" || meta.type === "PAYMENT")) {
+        await tx.insert(contactTransactions).values({
           organizationId: ctx.organizationId,
-          financialAccountId: src.id,
-          destinationAccountId: body.destination_account_id ?? null,
-          contactId: body.contact_id ?? null,
-          txType: meta.type,
-          paymentMethod: body.payment_method,
-          currency: body.currency,
-          amount: body.amount,
-          txDate: body.transaction_date,
-          trackingNumber: body.reference_number ?? null,
-          relatedDocumentType: body.related_document_type ?? null,
-          relatedDocumentId: body.related_document_id ?? null,
+          contactId: contact.id,
+          referenceType: "TREASURY",
+          referenceId: ftx.id,
+          txDate: transactionDate,
+          debit: meta.type === "PAYMENT" ? formatDecimal(amount, 2) : "0.00",
+          credit: meta.type === "RECEIPT" ? formatDecimal(amount, 2) : "0.00",
           description: body.description,
-          status: "CONFIRMED",
-          createdBy: ctx.userId,
-        })
-        .returning();
-      return ftx;
+        });
+      }
+
+      if (idemKey) {
+        await tx.insert(idempotencyKeys).values({
+          organizationId: ctx.organizationId,
+          key: idemKey,
+          endpoint,
+          requestHash,
+          statusCode: 201,
+          responseBody: linkedTx as unknown as Record<string, unknown>,
+          expiresAt: new Date(Date.now() + 7 * 86400 * 1000),
+        });
+      }
+      return { transaction: linkedTx, replayed: false };
     });
 
-    await recordAuditLog({
-      organizationId: ctx.organizationId,
-      actorUserId: ctx.userId,
-      actorEmail: ctx.email,
-      scope: "ORGANIZATION",
-      action: `TREASURY_${meta.type}`,
-      entityType: "FINANCIAL_TRANSACTION",
-      entityId: created.id,
-    });
+    if (!result.replayed) {
+      await recordAuditLog({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        actorEmail: ctx.email,
+        scope: "ORGANIZATION",
+        action: `TREASURY_${meta.type}`,
+        entityType: "FINANCIAL_TRANSACTION",
+        entityId: String((result.transaction as { id: string }).id),
+        ipAddress: ctx.ipAddress,
+      });
+    }
 
-    return ok(created, 201);
+    return ok(result.transaction, result.replayed ? 200 : 201, result.replayed ? { replayed: true } : undefined);
   }
 
   throw new ApiError(404, "ROUTE_NOT_FOUND", "مسیر خزانه‌داری یافت نشد.");

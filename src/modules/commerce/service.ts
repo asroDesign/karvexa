@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   accounts,
   chequeEvents,
@@ -7,8 +7,11 @@ import {
   financialAccounts,
   financialTransactions,
   invoicePaymentAllocations,
+  journalEntries,
+  journalEntryLines,
   loyaltyAccounts,
   loyaltyTransactions,
+  organizations,
   purchaseInvoiceItems,
   purchaseInvoices,
   salesInvoiceItems,
@@ -18,9 +21,12 @@ import { gregorianIsoToJalali, resolveCanonicalDate } from "@/lib/jalali";
 import { ensurePrompt05OrgDefaults } from "@/db/seed-prompt05";
 import {
   addDec,
+  eqDec,
   formatDecimal,
+  divDec,
   gtDec,
   isPositiveDec,
+  mulDec,
   parseDecimal,
   subDec,
 } from "@/lib/decimal";
@@ -104,6 +110,11 @@ export async function finalizeSalesInvoice(params: {
   await ensurePrompt05OrgDefaults(params.organizationId);
 
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM sales_invoices
+      WHERE id = ${params.invoiceId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [inv] = await tx
       .select()
       .from(salesInvoices)
@@ -118,6 +129,11 @@ export async function finalizeSalesInvoice(params: {
     if (!inv) throw new ApiError(404, "INVOICE_NOT_FOUND", "فاکتور فروش یافت نشد.");
     if (inv.status !== "DRAFT") {
       throw new ApiError(409, "INVOICE_ALREADY_FINALIZED", "این فاکتور قبلاً نهایی یا باطل شده است.");
+    }
+    const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, params.organizationId)).limit(1);
+    if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
+    if (inv.currency !== organization.baseCurrency || !eqDec(inv.exchangeRate, "1.0000")) {
+      throw new ApiError(422, "FOREIGN_CURRENCY_POSTING_UNSUPPORTED", `ثبت قطعی فاکتور با ارز ${inv.currency} در دفتر ${organization.baseCurrency} به نرخ تسعیر و حساب‌های ارزی نیاز دارد؛ تا پشتیبانی کامل تسعیر، فاکتور را با ارز پایه و نرخ ۱ ثبت کنید.`);
     }
 
     const items = await tx
@@ -187,14 +203,44 @@ export async function finalizeSalesInvoice(params: {
     const bankAcc = (await findSystemAccount(tx, params.organizationId, "BANK"))!;
     const taxAcc = await findSystemAccount(tx, params.organizationId, "TAX_PAYABLE", true);
     const discAcc = await findSystemAccount(tx, params.organizationId, "SALES_DISCOUNT", true);
+    if (isPositiveDec(parseDecimal(inv.taxAmount)) && !taxAcc) {
+      throw new ApiError(422, "TAX_PAYABLE_ACCOUNT_MISSING", "برای فاکتور دارای مالیات، حساب مالیات پرداختنی باید در کدینگ تعریف شود.");
+    }
+    if (isPositiveDec(parseDecimal(inv.discountAmount)) && !discAcc) {
+      throw new ApiError(422, "SALES_DISCOUNT_ACCOUNT_MISSING", "برای ثبت فاکتور دارای تخفیف، حساب تخفیف فروش باید در کدینگ تعریف شود.");
+    }
 
-    const orgFinAccs = await tx
+    let orgFinAccs = await tx
       .select()
       .from(financialAccounts)
       .where(eq(financialAccounts.organizationId, params.organizationId));
 
+    const resolveTargetFin = (alloc: PaymentAllocationInput) => {
+      if (alloc.financialAccountId) return orgFinAccs.find((f) => f.id === alloc.financialAccountId);
+      if (alloc.paymentMethod === "CASH") return orgFinAccs.find((f) => f.accountType === "CASHBOX" || f.accountType === "CASH");
+      if (alloc.paymentMethod === "POS" || alloc.paymentMethod === "CARD_TERMINAL") return orgFinAccs.find((f) => f.accountType === "POS" || f.accountType === "CARD_TERMINAL");
+      return orgFinAccs.find((f) => f.accountType === "BANK");
+    };
+    const plannedFinIds = new Set<string>();
+    for (const alloc of allocations) {
+      if (alloc.paymentMethod === "CHEQUE") continue;
+      const target = resolveTargetFin(alloc);
+      if (!target) throw new ApiError(422, "TREASURY_ACCOUNT_REQUIRED", `برای روش پرداخت ${alloc.paymentMethod} حساب خزانه فعال تعریف نشده است.`);
+      if (!target.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", `حساب خزانه «${target.name}» غیرفعال است.`);
+      if (target.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", `حساب «${target.name}» ارز ${target.currency} دارد؛ دریافت چندارزی تا پیاده‌سازی کامل تسعیر مجاز نیست.`);
+      plannedFinIds.add(target.id);
+    }
+    for (const accountId of [...plannedFinIds].sort()) {
+      await tx.execute(sql`SELECT id FROM financial_accounts WHERE id = ${accountId} AND organization_id = ${params.organizationId} FOR UPDATE`);
+    }
+    if (plannedFinIds.size > 0) {
+      orgFinAccs = await tx.select().from(financialAccounts).where(eq(financialAccounts.organizationId, params.organizationId));
+    }
+
     const jLines: JournalLineInput[] = [];
     const savedAllocations = [];
+    const savedFinancialTransactionIds: string[] = [];
+    const paymentLedgerRefs: Array<{ referenceId: string; amount: string }> = [];
 
     const recChqAcc = await findSystemAccount(tx, params.organizationId, "RECEIVABLE_CHEQUE", true);
     const createdCheques = [];
@@ -242,6 +288,7 @@ export async function finalizeSalesInvoice(params: {
           due_date_jalali: gregorianIsoToJalali(chDueDate),
           issue_date_jalali: gregorianIsoToJalali(chIssueDate),
         });
+        paymentLedgerRefs.push({ referenceId: createdChq.id, amount: alloc.amount });
 
         jLines.push({
           accountId: recChqAcc?.id ?? arAcc.id,
@@ -274,43 +321,35 @@ export async function finalizeSalesInvoice(params: {
       let targetFin = alloc.financialAccountId
         ? orgFinAccs.find((f) => f.id === alloc.financialAccountId)
         : undefined;
-      if (!targetFin) {
-        if (alloc.paymentMethod === "CASH") {
-          targetFin = orgFinAccs.find((f) => f.accountType === "CASHBOX" || f.accountType === "CASH") ?? orgFinAccs[0];
-        } else if (alloc.paymentMethod === "POS" || alloc.paymentMethod === "CARD_TERMINAL") {
-          targetFin = orgFinAccs.find((f) => f.accountType === "POS" || f.accountType === "CARD_TERMINAL") ?? orgFinAccs.find((f) => f.accountType === "BANK");
-        } else {
-          targetFin = orgFinAccs.find((f) => f.accountType === "BANK") ?? orgFinAccs[0];
-        }
-      }
-
-      if (targetFin) {
-        const nextBal = addDec(targetFin.balance, alloc.amount);
-        await tx
-          .update(financialAccounts)
-          .set({ balance: formatDecimal(nextBal, 2) })
-          .where(eq(financialAccounts.id, targetFin.id));
-        targetFin.balance = formatDecimal(nextBal, 2);
-
-        await tx.insert(financialTransactions).values({
-          organizationId: params.organizationId,
-          financialAccountId: targetFin.id,
-          contactId: inv.contactId,
-          txType: "RECEIPT",
-          paymentMethod: alloc.paymentMethod,
-          amount: alloc.amount,
-          txDate: inv.invoiceDate,
-          trackingNumber: alloc.referenceNumber ?? null,
-          relatedDocumentType: "SALES_INVOICE",
-          relatedDocumentId: inv.id,
-          description: `دریافت (${alloc.paymentMethod}) بابت فاکتور فروش ${inv.invoiceNumber}`,
-          createdBy: params.actorUserId,
-        });
-      }
-
-      const glId =
-        targetFin?.accountId ??
-        (alloc.paymentMethod === "CASH" ? cashAcc.id : bankAcc.id);
+      if (alloc.financialAccountId && !targetFin) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب خزانه انتخاب‌شده متعلق به این سازمان نیست.");
+      if (!targetFin) targetFin = resolveTargetFin(alloc);
+      if (!targetFin) throw new ApiError(422, "TREASURY_ACCOUNT_REQUIRED", `برای روش پرداخت ${alloc.paymentMethod} حساب خزانه تعریف نشده است.`);
+      if (!targetFin.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", `حساب خزانه «${targetFin.name}» غیرفعال است.`);
+      if (targetFin.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", `حساب «${targetFin.name}» ارز ${targetFin.currency} دارد؛ دریافت چندارزی تا پیاده‌سازی کامل تسعیر مجاز نیست.`);
+      const nextBal = addDec(targetFin.balance, alloc.amount);
+      const [updatedFin] = await tx.update(financialAccounts).set({
+        balance: formatDecimal(nextBal, 2), version: targetFin.version + 1, updatedAt: new Date(),
+      }).where(and(eq(financialAccounts.id, targetFin.id), eq(financialAccounts.version, targetFin.version))).returning({ id: financialAccounts.id });
+      if (!updatedFin) throw new ApiError(409, "TREASURY_ACCOUNT_CHANGED", "حساب خزانه هم‌زمان تغییر کرده است؛ درخواست را دوباره ارسال کنید.");
+      targetFin.balance = formatDecimal(nextBal, 2);
+      const glId = targetFin.accountId ?? (targetFin.accountType === "CASHBOX" || targetFin.accountType === "CASH" ? cashAcc.id : bankAcc.id);
+      const [finTx] = await tx.insert(financialTransactions).values({
+        organizationId: params.organizationId,
+        financialAccountId: targetFin.id,
+        contactId: inv.contactId,
+        txType: "RECEIPT",
+        paymentMethod: alloc.paymentMethod,
+        currency: inv.currency,
+        amount: alloc.amount,
+        txDate: inv.invoiceDate,
+        trackingNumber: alloc.referenceNumber ?? null,
+        relatedDocumentType: "SALES_INVOICE",
+        relatedDocumentId: inv.id,
+        description: `دریافت (${alloc.paymentMethod}) بابت فاکتور فروش ${inv.invoiceNumber}`,
+        createdBy: params.actorUserId,
+      }).returning({ id: financialTransactions.id });
+      savedFinancialTransactionIds.push(finTx.id);
+      paymentLedgerRefs.push({ referenceId: finTx.id, amount: alloc.amount });
 
       jLines.push({
         accountId: glId,
@@ -446,6 +485,9 @@ export async function finalizeSalesInvoice(params: {
         .set({ journalEntryId: journalRes.entry.id })
         .where(eq(cheques.id, ch.id));
     }
+    for (const financialTransactionId of savedFinancialTransactionIds) {
+      await tx.update(financialTransactions).set({ journalEntryId: journalRes.entry.id, version: 2, updatedAt: new Date() }).where(eq(financialTransactions.id, financialTransactionId));
+    }
 
     // 3. Contact ledger: invoice debit + immediate payment credit
     await tx.insert(contactTransactions).values({
@@ -458,15 +500,15 @@ export async function finalizeSalesInvoice(params: {
       credit: "0.00",
       description: `فاکتور فروش ${inv.invoiceNumber}`,
     });
-    if (isPositiveDec(totalAllocated)) {
+    for (const payment of paymentLedgerRefs) {
       await tx.insert(contactTransactions).values({
         organizationId: params.organizationId,
         contactId: inv.contactId,
         referenceType: "TREASURY",
-        referenceId: inv.id,
+        referenceId: payment.referenceId,
         txDate: inv.invoiceDate,
         debit: "0.00",
-        credit: formatDecimal(totalAllocated, 2),
+        credit: formatDecimal(parseDecimal(payment.amount), 2),
         description: `پرداخت هم‌زمان فاکتور فروش ${inv.invoiceNumber}`,
       });
     }
@@ -566,11 +608,23 @@ export async function finalizeSalesInvoice(params: {
 export async function recordSubsequentInvoicePayment(params: {
   organizationId: string;
   invoiceId: string;
-  financialAccountId: string;
+  financialAccountId?: string | null;
   paymentMethod: "CASH" | "POS" | "BANK_TRANSFER" | "WALLET" | "CHEQUE" | "OTHER";
   amount: string;
   paidAt: string;
   referenceNumber?: string | null;
+  cheque?: {
+    chequeNumber: string;
+    serialNumber?: string;
+    bankName: string;
+    branchName?: string | null;
+    drawerName?: string | null;
+    issueDate?: string;
+    issueDateJalali?: string;
+    dueDate?: string;
+    dueDateJalali?: string;
+    notes?: string | null;
+  } | null;
   idempotencyKey?: string | null;
   actorUserId: string;
   actorEmail: string;
@@ -579,8 +633,18 @@ export async function recordSubsequentInvoicePayment(params: {
   if (!isPositiveDec(parseDecimal(params.amount))) {
     throw new ApiError(422, "AMOUNT_INVALID", "مبلغ پرداخت باید بزرگ‌تر از صفر باشد.");
   }
+  const paidAt = resolveCanonicalDate(params.paidAt);
+  if (params.paymentMethod === "CHEQUE" && !params.cheque) {
+    throw new ApiError(422, "CHEQUE_DETAILS_REQUIRED", "برای ثبت چک، اطلاعات کامل چک الزامی است.");
+  }
+  if (params.paymentMethod !== "CHEQUE" && !params.financialAccountId) {
+    throw new ApiError(422, "TREASURY_ACCOUNT_REQUIRED", "انتخاب حساب خزانه برای دریافت وجه الزامی است.");
+  }
 
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    if (params.idempotencyKey) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${params.organizationId}:${params.idempotencyKey}`}))`);
+    }
     // Per-payment idempotency guard
     if (params.idempotencyKey) {
       const [dup] = await tx
@@ -594,6 +658,16 @@ export async function recordSubsequentInvoicePayment(params: {
         )
         .limit(1);
       if (dup) {
+        const payloadMatches =
+          dup.salesInvoiceId === params.invoiceId &&
+          dup.amount === formatDecimal(parseDecimal(params.amount), 2) &&
+          dup.paymentMethod === params.paymentMethod &&
+          dup.financialAccountId === (params.paymentMethod === "CHEQUE" ? null : params.financialAccountId) &&
+          dup.paidAt === paidAt &&
+          (dup.referenceNumber ?? null) === (params.referenceNumber ?? params.cheque?.chequeNumber ?? null);
+        if (!payloadMatches) {
+          throw new ApiError(409, "IDEMPOTENCY_KEY_REUSED", "کلید تکرار با اطلاعات پرداخت دیگری استفاده شده است.");
+        }
         const [invRow] = await tx
           .select()
           .from(salesInvoices)
@@ -603,6 +677,11 @@ export async function recordSubsequentInvoicePayment(params: {
       }
     }
 
+    await tx.execute(sql`
+      SELECT id FROM sales_invoices
+      WHERE id = ${params.invoiceId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [inv] = await tx
       .select()
       .from(salesInvoices)
@@ -614,6 +693,41 @@ export async function recordSubsequentInvoicePayment(params: {
       )
       .limit(1);
     if (!inv) throw new ApiError(404, "SALES_INVOICE_NOT_FOUND", "فاکتور فروش یافت نشد.");
+    if (inv.status !== "CONFIRMED") {
+      throw new ApiError(409, "SALES_INVOICE_NOT_PAYABLE", "فقط فاکتور فروش نهایی‌شده قابل تسویه است.");
+    }
+    const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, params.organizationId)).limit(1);
+    if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
+    if (inv.currency !== organization.baseCurrency || !eqDec(inv.exchangeRate, "1.0000")) {
+      throw new ApiError(422, "FOREIGN_CURRENCY_POSTING_UNSUPPORTED", `ثبت تسویه فاکتور با ارز ${inv.currency} در دفتر ${organization.baseCurrency} تا پیاده‌سازی کامل تسعیر مجاز نیست.`);
+    }
+
+    // Another request may have completed this idempotency key while this request waited on the invoice row.
+    if (params.idempotencyKey) {
+      const [dup] = await tx
+        .select()
+        .from(invoicePaymentAllocations)
+        .where(
+          and(
+            eq(invoicePaymentAllocations.organizationId, params.organizationId),
+            eq(invoicePaymentAllocations.idempotencyKey, params.idempotencyKey)
+          )
+        )
+        .limit(1);
+      if (dup) {
+        const payloadMatches =
+          dup.salesInvoiceId === params.invoiceId &&
+          dup.amount === formatDecimal(parseDecimal(params.amount), 2) &&
+          dup.paymentMethod === params.paymentMethod &&
+          dup.financialAccountId === (params.paymentMethod === "CHEQUE" ? null : params.financialAccountId) &&
+          dup.paidAt === paidAt &&
+          (dup.referenceNumber ?? null) === (params.referenceNumber ?? params.cheque?.chequeNumber ?? null);
+        if (!payloadMatches) {
+          throw new ApiError(409, "IDEMPOTENCY_KEY_REUSED", "کلید تکرار با اطلاعات پرداخت دیگری استفاده شده است.");
+        }
+        return { allocation: dup, invoice: inv, replayed: true };
+      }
+    }
 
     const currentRem =
       inv.remainingAmount === "0.00" && inv.paidAmount === "0.00"
@@ -628,69 +742,132 @@ export async function recordSubsequentInvoicePayment(params: {
       );
     }
 
-    const [fa] = await tx
-      .select()
-      .from(financialAccounts)
-      .where(
-        and(
-          eq(financialAccounts.id, params.financialAccountId),
-          eq(financialAccounts.organizationId, params.organizationId)
-        )
-      )
-      .limit(1);
-    if (!fa) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب خزانه یافت نشد.");
-
     const arAcc = (await findSystemAccount(tx, params.organizationId, "AR"))!;
-    const cashAcc = (await findSystemAccount(tx, params.organizationId, "CASH"))!;
-    const bankAcc = (await findSystemAccount(tx, params.organizationId, "BANK"))!;
-    const glId = fa.accountId ?? (fa.accountType === "CASHBOX" ? cashAcc.id : bankAcc.id);
-
-    // 1. Update Treasury Account Balance
-    const nextFaBal = addDec(fa.balance, params.amount);
-    await tx
-      .update(financialAccounts)
-      .set({ balance: formatDecimal(nextFaBal, 2) })
-      .where(eq(financialAccounts.id, fa.id));
+    const journalLines: JournalLineInput[] = [];
+    let fa: typeof financialAccounts.$inferSelect | null = null;
+    let createdCheque: typeof cheques.$inferSelect | null = null;
+    if (params.paymentMethod === "CHEQUE") {
+      const chequeData = params.cheque!;
+      const receivableChequeAcc = (await findSystemAccount(tx, params.organizationId, "RECEIVABLE_CHEQUE"))!;
+      const issueDate = resolveCanonicalDate(chequeData.issueDate || paidAt, chequeData.issueDateJalali);
+      const dueDate = resolveCanonicalDate(chequeData.dueDate, chequeData.dueDateJalali);
+      const chequeNumber = chequeData.chequeNumber.trim();
+      [createdCheque] = await tx
+        .insert(cheques)
+        .values({
+          organizationId: params.organizationId,
+          contactId: inv.contactId,
+          chequeType: "RECEIVABLE",
+          sayadId: chequeNumber,
+          serialNumber: chequeData.serialNumber?.trim() || chequeNumber.slice(-6),
+          bankName: chequeData.bankName.trim(),
+          branchName: chequeData.branchName ?? null,
+          drawerName: chequeData.drawerName ?? null,
+          amount: formatDecimal(parseDecimal(params.amount), 2),
+          issueDate,
+          dueDate,
+          relatedDocumentType: "SALES_INVOICE",
+          relatedDocumentId: inv.id,
+          status: "RECEIVED",
+          notes: chequeData.notes ?? `چک دریافتی بابت تسویه فاکتور ${inv.invoiceNumber}`,
+        })
+        .returning();
+      await tx.insert(chequeEvents).values({
+        organizationId: params.organizationId,
+        chequeId: createdCheque.id,
+        fromStatus: null,
+        toStatus: "RECEIVED",
+        eventDate: paidAt,
+        note: `ثبت چک بابت تسویه فاکتور ${inv.invoiceNumber}`,
+        actorUserId: params.actorUserId,
+      });
+      journalLines.push({
+        accountId: receivableChequeAcc.id,
+        contactId: inv.contactId,
+        debit: params.amount,
+        credit: "0.00",
+        description: `دریافت چک ${chequeNumber} بابت فاکتور ${inv.invoiceNumber}`,
+      });
+    } else {
+      await tx.execute(sql`
+        SELECT id FROM financial_accounts
+        WHERE id = ${params.financialAccountId!} AND organization_id = ${params.organizationId}
+        FOR UPDATE
+      `);
+      const [lockedFa] = await tx
+        .select()
+        .from(financialAccounts)
+        .where(
+          and(
+            eq(financialAccounts.id, params.financialAccountId!),
+            eq(financialAccounts.organizationId, params.organizationId)
+          )
+        )
+        .limit(1);
+      if (!lockedFa) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب خزانه یافت نشد.");
+      if (!lockedFa.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", "حساب خزانه غیرفعال است.");
+      if (lockedFa.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", "حساب خزانه با ارز پایه دفتر کل یکسان نیست.");
+      fa = lockedFa;
+      const cashAcc = (await findSystemAccount(tx, params.organizationId, "CASH"))!;
+      const bankAcc = (await findSystemAccount(tx, params.organizationId, "BANK"))!;
+      const glId = fa.accountId ?? (fa.accountType === "CASHBOX" || fa.accountType === "CASH" ? cashAcc.id : bankAcc.id);
+      const nextFaBal = addDec(fa.balance, params.amount);
+      await tx
+        .update(financialAccounts)
+        .set({ balance: formatDecimal(nextFaBal, 2), version: fa.version + 1, updatedAt: new Date() })
+        .where(and(eq(financialAccounts.id, fa.id), eq(financialAccounts.version, fa.version)));
+      journalLines.push({ accountId: glId, debit: params.amount, credit: "0.00", description: `واریز به ${fa.name}` });
+    }
+    journalLines.push({
+      accountId: arAcc.id,
+      contactId: inv.contactId,
+      debit: "0.00",
+      credit: params.amount,
+      description: `کاهش مانده بدهی مشتری بابت ${inv.invoiceNumber}`,
+    });
 
     // 2. Post balanced Double-Entry Journal: DR Cash/Bank / CR AR
     const jRes = await createJournalEntryTx(tx, {
       organizationId: params.organizationId,
       actorUserId: params.actorUserId,
       actorEmail: params.actorEmail,
-      entryDate: params.paidAt,
+      entryDate: paidAt,
       description: `دریافت مطالبات مشتری بابت فاکتور فروش ${inv.invoiceNumber}`,
       referenceType: "TREASURY",
       referenceId: inv.id,
       postImmediately: true,
-      lines: [
-        { accountId: glId, debit: params.amount, credit: "0.00", description: `واریز به ${fa.name}` },
-        { accountId: arAcc.id, contactId: inv.contactId, debit: "0.00", credit: params.amount, description: `کاهش مانده بدهی مشتری بابت ${inv.invoiceNumber}` },
-      ],
+      lines: journalLines,
     });
 
     // 3. Record Treasury Transaction + Contact Ledger Credit + Payment Allocation
-    await tx.insert(financialTransactions).values({
-      organizationId: params.organizationId,
-      financialAccountId: fa.id,
-      contactId: inv.contactId,
-      txType: "RECEIPT",
-      paymentMethod: params.paymentMethod,
-      amount: params.amount,
-      txDate: params.paidAt,
-      trackingNumber: params.referenceNumber ?? null,
-      relatedDocumentType: "SALES_INVOICE",
-      relatedDocumentId: inv.id,
-      journalEntryId: jRes.entry.id,
-      description: `تسویه بدهی فاکتور ${inv.invoiceNumber}`,
-      createdBy: params.actorUserId,
-    });
+    let financialTransactionId: string | null = null;
+    if (fa) {
+      const [financialTx] = await tx.insert(financialTransactions).values({
+        organizationId: params.organizationId,
+        financialAccountId: fa.id,
+        contactId: inv.contactId,
+        txType: "RECEIPT",
+        paymentMethod: params.paymentMethod,
+        amount: formatDecimal(parseDecimal(params.amount), 2),
+        currency: inv.currency,
+        txDate: paidAt,
+        trackingNumber: params.referenceNumber ?? null,
+        relatedDocumentType: "SALES_INVOICE",
+        relatedDocumentId: inv.id,
+        journalEntryId: jRes.entry.id,
+        description: `تسویه بدهی فاکتور ${inv.invoiceNumber}`,
+        createdBy: params.actorUserId,
+      }).returning({ id: financialTransactions.id });
+      financialTransactionId = financialTx.id;
+      await tx.update(financialTransactions).set({ version: 2, updatedAt: new Date() }).where(eq(financialTransactions.id, financialTx.id));
+    }
 
     await tx.insert(contactTransactions).values({
       organizationId: params.organizationId,
       contactId: inv.contactId,
       referenceType: "TREASURY",
-      referenceId: inv.id,
-      txDate: params.paidAt,
+      referenceId: financialTransactionId ?? createdCheque!.id,
+      txDate: paidAt,
       debit: "0.00",
       credit: params.amount,
       description: `دریافت وجه بابت فاکتور ${inv.invoiceNumber}`,
@@ -701,11 +878,12 @@ export async function recordSubsequentInvoicePayment(params: {
       .values({
         organizationId: params.organizationId,
         salesInvoiceId: inv.id,
-        financialAccountId: fa.id,
+        financialAccountId: fa?.id ?? null,
+        chequeId: createdCheque?.id ?? null,
         paymentMethod: params.paymentMethod,
-        amount: params.amount,
-        paidAt: params.paidAt,
-        referenceNumber: params.referenceNumber ?? null,
+        amount: formatDecimal(parseDecimal(params.amount), 2),
+        paidAt,
+        referenceNumber: params.referenceNumber ?? createdCheque?.sayadId ?? null,
         journalEntryId: jRes.entry.id,
         idempotencyKey: params.idempotencyKey ?? null,
         status: "CONFIRMED",
@@ -723,12 +901,14 @@ export async function recordSubsequentInvoicePayment(params: {
         paidAmount: formatDecimal(nextPaid, 2),
         remainingAmount: formatDecimal(nextRem, 2),
         paymentStatus,
+        version: inv.version + 1,
+        syncSeq: Date.now(),
         updatedAt: new Date(),
       })
       .where(eq(salesInvoices.id, inv.id))
       .returning();
 
-    return { allocation: alloc, invoice: updatedInv, journalEntry: jRes.entry, replayed: false };
+    return { allocation: alloc, invoice: updatedInv, journalEntry: jRes.entry, cheque: createdCheque, replayed: false };
   });
 
   if (!result.replayed) {
@@ -758,7 +938,13 @@ export async function finalizePurchaseInvoice(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
+  await ensurePrompt05OrgDefaults(params.organizationId);
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM purchase_invoices
+      WHERE id = ${params.invoiceId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [inv] = await tx
       .select()
       .from(purchaseInvoices)
@@ -784,6 +970,48 @@ export async function finalizePurchaseInvoice(params: {
       throw new ApiError(422, "INVOICE_NO_ITEMS", "فاکتور خرید فاقد ردیف کالا است.");
     }
 
+    const itemsSubtotal = items.reduce((sum, item) => addDec(sum, parseDecimal(item.lineTotal)), BigInt(0));
+    if (!eqDec(itemsSubtotal, inv.subtotal)) {
+      throw new ApiError(409, "PURCHASE_SUBTOTAL_MISMATCH", "جمع ردیف‌های فاکتور خرید با جمع ثبت‌شده در سربرگ یکسان نیست.");
+    }
+    const itemDiscountTotal = items.reduce((sum, item) => addDec(sum, parseDecimal(item.discountAmount)), BigInt(0));
+    const itemTaxTotal = items.reduce((sum, item) => addDec(sum, parseDecimal(item.taxAmount)), BigInt(0));
+    if (gtDec(itemDiscountTotal, parseDecimal(inv.discountAmount))) {
+      throw new ApiError(409, "PURCHASE_DISCOUNT_MISMATCH", "جمع تخفیف ردیف‌های فاکتور خرید از تخفیف سربرگ بیشتر است.");
+    }
+    if (isPositiveDec(itemTaxTotal) && !eqDec(itemTaxTotal, parseDecimal(inv.taxAmount))) {
+      throw new ApiError(409, "PURCHASE_TAX_MISMATCH", "جمع مالیات ردیف‌های فاکتور خرید با مالیات سربرگ برابر نیست.");
+    }
+    const taxAmount = parseDecimal(inv.taxAmount);
+    const purchaseCost = addDec(
+      subDec(itemsSubtotal, parseDecimal(inv.discountAmount)),
+      addDec(parseDecimal(inv.shippingCost), parseDecimal(inv.otherCosts))
+    );
+    const expectedInvoiceTotal = addDec(purchaseCost, taxAmount);
+    if (!isPositiveDec(purchaseCost) || !eqDec(expectedInvoiceTotal, inv.totalAmount)) {
+      throw new ApiError(422, "PURCHASE_TOTAL_INVALID", "مبلغ نهایی فاکتور خرید با جمع کالا، تخفیف، مالیات و هزینه‌های جانبی سازگار نیست.");
+    }
+    const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, params.organizationId)).limit(1);
+    if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
+    if (inv.currency !== organization.baseCurrency || !eqDec(inv.exchangeRate, "1.0000")) {
+      throw new ApiError(422, "FOREIGN_CURRENCY_POSTING_UNSUPPORTED", `ثبت قطعی خرید با ارز ${inv.currency} در دفتر ${organization.baseCurrency} تا پیاده‌سازی کامل تسعیر مجاز نیست.`);
+    }
+
+    let allocatedPurchaseCost = BigInt(0);
+    const valuedItems = items.map((item, index) => {
+      const lineCost = index === items.length - 1
+        ? subDec(purchaseCost, allocatedPurchaseCost)
+        : mulDec(purchaseCost, divDec(parseDecimal(item.lineTotal), itemsSubtotal));
+      allocatedPurchaseCost = addDec(allocatedPurchaseCost, lineCost);
+      return {
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        direction: "IN" as const,
+        quantity: item.quantity,
+        totalCost: formatDecimal(lineCost, 2),
+      };
+    });
+
     const stockRes = await postStockDocumentTx(tx, {
       organizationId: params.organizationId,
       warehouseId: inv.warehouseId,
@@ -793,16 +1021,79 @@ export async function finalizePurchaseInvoice(params: {
       referenceType: "PURCHASE_INVOICE",
       referenceId: inv.id,
       actorUserId: params.actorUserId,
-      items: items.map((it) => ({
-        productId: it.productId,
-        direction: "IN",
-        quantity: it.quantity,
-        unitCost: it.unitPrice,
-      })),
+      items: valuedItems,
     });
+    if (!eqDec(stockRes.totalCostValue, purchaseCost)) {
+      throw new ApiError(409, "PURCHASE_STOCK_VALUE_MISMATCH", "ارزش رسید انبار با مبلغ نهایی فاکتور خرید برابر نشد.");
+    }
 
     const invAcc = (await findSystemAccount(tx, params.organizationId, "INVENTORY"))!;
     const apAcc = (await findSystemAccount(tx, params.organizationId, "AP"))!;
+    const taxReceivableAcc = isPositiveDec(taxAmount)
+      ? (await findSystemAccount(tx, params.organizationId, "TAX_RECEIVABLE"))!
+      : null;
+    const supplierLedger = await tx.select({ debit: contactTransactions.debit, credit: contactTransactions.credit }).from(contactTransactions).where(and(
+      eq(contactTransactions.organizationId, params.organizationId),
+      eq(contactTransactions.contactId, inv.contactId)
+    ));
+    let supplierDebitBalance = BigInt(0);
+    for (const row of supplierLedger) supplierDebitBalance = addDec(supplierDebitBalance, subDec(row.debit, row.credit));
+    const advanceApplied = supplierDebitBalance > BigInt(0)
+      ? (supplierDebitBalance < parseDecimal(inv.totalAmount) ? supplierDebitBalance : parseDecimal(inv.totalAmount))
+      : BigInt(0);
+    const supplierAdvanceAcc = await findSystemAccount(tx, params.organizationId, "SUPPLIER_ADVANCE", true);
+    let supplierAdvanceBalance = BigInt(0);
+    if (supplierAdvanceAcc) {
+      const advanceLines = await tx.select({ debit: journalEntryLines.debit, credit: journalEntryLines.credit })
+        .from(journalEntryLines)
+        .innerJoin(journalEntries, eq(journalEntryLines.journalEntryId, journalEntries.id))
+        .where(and(
+          eq(journalEntries.organizationId, params.organizationId),
+          eq(journalEntryLines.accountId, supplierAdvanceAcc.id),
+          eq(journalEntryLines.contactId, inv.contactId),
+          inArray(journalEntries.status, ["POSTED", "REVERSED"])
+        ));
+      for (const line of advanceLines) supplierAdvanceBalance = addDec(supplierAdvanceBalance, subDec(line.debit, line.credit));
+    }
+    const advanceAssetApplied = supplierAdvanceBalance > BigInt(0)
+      ? (supplierAdvanceBalance < advanceApplied ? supplierAdvanceBalance : advanceApplied)
+      : BigInt(0);
+    const remainingPayable = subDec(parseDecimal(inv.totalAmount), advanceApplied);
+
+    const purchaseJournalLines: JournalLineInput[] = [
+      {
+        accountId: invAcc.id,
+        debit: formatDecimal(purchaseCost, 2),
+        credit: "0.00",
+        description: `بهای تحصیل خالص کالا و هزینه‌های مستقیم فاکتور خرید ${inv.invoiceNumber}`,
+      },
+      ...(taxReceivableAcc ? [{
+        accountId: taxReceivableAcc.id,
+        debit: formatDecimal(taxAmount, 2),
+        credit: "0.00",
+        description: `اعتبار مالیات بر ارزش افزوده خرید ${inv.invoiceNumber}`,
+      }] : []),
+      {
+        accountId: apAcc.id,
+        contactId: inv.contactId,
+        debit: "0.00",
+        credit: inv.totalAmount,
+        description: `بستانکاری تأمین‌کننده بابت فاکتور خرید ${inv.invoiceNumber}`,
+      },
+      ...(isPositiveDec(advanceAssetApplied) && supplierAdvanceAcc ? [{
+        accountId: apAcc.id,
+        contactId: inv.contactId,
+        debit: formatDecimal(advanceAssetApplied, 2),
+        credit: "0.00",
+        description: `اعمال پیش‌پرداخت تأمین‌کننده روی حساب پرداختنی ${inv.invoiceNumber}`,
+      }, {
+        accountId: supplierAdvanceAcc.id,
+        contactId: inv.contactId,
+        debit: "0.00",
+        credit: formatDecimal(advanceAssetApplied, 2),
+        description: `اعمال پیش‌پرداخت تأمین‌کننده روی فاکتور خرید ${inv.invoiceNumber}`,
+      }] : []),
+    ];
 
     const journalRes = await createJournalEntryTx(tx, {
       organizationId: params.organizationId,
@@ -813,21 +1104,7 @@ export async function finalizePurchaseInvoice(params: {
       referenceType: "PURCHASE_INVOICE",
       referenceId: inv.id,
       postImmediately: true,
-      lines: [
-        {
-          accountId: invAcc.id,
-          debit: inv.totalAmount,
-          credit: "0.00",
-          description: `افزایش موجودی کالا بابت فاکتور خرید ${inv.invoiceNumber}`,
-        },
-        {
-          accountId: apAcc.id,
-          contactId: inv.contactId,
-          debit: "0.00",
-          credit: inv.totalAmount,
-          description: `بستانکار تأمین‌کننده بابت فاکتور خرید ${inv.invoiceNumber}`,
-        },
-      ],
+      lines: purchaseJournalLines,
     });
 
     await tx.insert(contactTransactions).values({
@@ -845,6 +1122,8 @@ export async function finalizePurchaseInvoice(params: {
       .update(purchaseInvoices)
       .set({
         status: "CONFIRMED",
+        paidAmount: formatDecimal(advanceApplied, 2),
+        remainingAmount: formatDecimal(remainingPayable, 2),
         stockDocumentId: stockRes.document.id,
         journalEntryId: journalRes.entry.id,
         version: inv.version + 1,
@@ -856,6 +1135,7 @@ export async function finalizePurchaseInvoice(params: {
 
     return {
       invoice: finalized,
+      supplierAdvanceApplied: formatDecimal(advanceApplied, 2),
       stockDocument: stockRes.document,
       journalEntry: journalRes.entry,
     };

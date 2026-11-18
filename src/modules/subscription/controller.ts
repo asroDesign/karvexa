@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import {
   devices,
   features,
+  organizations,
   files,
   paymentGatewaySettings,
   paymentOrders,
@@ -13,6 +14,7 @@ import {
   planFeatures,
   plans,
   purchaseReceipts,
+  subscriptions,
   syncBatches,
   syncConflicts,
 } from "@/db/schema";
@@ -57,25 +59,82 @@ export async function handleSubscriptionRoutes(
   const sub = segments[1];
   const sub2 = segments[2];
 
+  // Android's authoritative offline-entitlement contract.
+  if (method === "GET" && sub === "me" && sub2 === "changes") {
+    const ctx = await requireOrgContext(req, "org.dashboard.read");
+    const sinceVersion = Number.parseInt(req.nextUrl.searchParams.get("since_version") ?? "0", 10) || 0;
+    const snapshot = await buildSignedEntitlementSnapshot(ctx.organizationId);
+    const hasChanges = sinceVersion < snapshot.entitlement_version;
+    return ok({
+      has_changes: hasChanges,
+      current_version: snapshot.entitlement_version,
+      server_time_ms: snapshot.server_time_ms,
+      changes: hasChanges
+        ? [{
+            version: snapshot.entitlement_version,
+            change_type: "ENTITLEMENT_SNAPSHOT",
+            summary_fa: "وضعیت اشتراک و مجوزهای سازمان به‌روز شد.",
+            changed_keys: ["subscription", "entitlements"],
+          }]
+        : [],
+      latest_snapshot: hasChanges ? snapshot : null,
+    });
+  }
+
+  if (method === "GET" && sub === "me") {
+    const ctx = await requireOrgContext(req, "org.dashboard.read");
+    return ok(await buildSignedEntitlementSnapshot(ctx.organizationId));
+  }
+
   // GET /api/v1/subscription/plans
   if (method === "GET" && sub === "plans") {
     await requireAuth(req);
-    const [allPlans, allFeatures, allPlanFeats] = await Promise.all([
+    const [allPlans, allFeatures, allPlanFeats, activeGateways] = await Promise.all([
       db.select().from(plans).where(eq(plans.isActive, true)),
       db.select().from(features),
       db.select().from(planFeatures),
+      db.select().from(paymentGatewaySettings).where(eq(paymentGatewaySettings.isActive, true)),
     ]);
-    return ok(
-      allPlans.map((p) => ({
-        ...p,
-        features: allPlanFeats
-          .filter((pf) => pf.planId === p.id)
-          .map((pf) => ({
-            ...pf,
-            feature: allFeatures.find((f) => f.id === pf.featureId),
+    const featureById = new Map(allFeatures.map((feature) => [feature.id, feature]));
+    return ok({
+      currency_code: "IRT",
+      available_gateways: activeGateways
+        .sort((a, b) => a.priority - b.priority)
+        .map((gateway) => ({ code: gateway.gateway, display_name_fa: gateway.displayNameFa, is_recommended: gateway.isDefault })),
+      plans: allPlans.map((plan) => {
+        type AssignedPlanFeature =
+          | { kind: "limit"; key: string; title: string; value: number | null; unit: string }
+          | { kind: "feature"; key: string; title: string; enabled: boolean };
+        const assigned: AssignedPlanFeature[] = allPlanFeats.filter((row) => row.planId === plan.id).flatMap((row): AssignedPlanFeature[] => {
+          const feature = featureById.get(row.featureId);
+          if (!feature) return [];
+          if (feature.valueType === "LIMIT") {
+            const unit = feature.code.includes("warehouse") ? "warehouse"
+              : feature.code.includes("user") ? "user"
+                : feature.code.includes("document") ? "document" : "count";
+            return [{ kind: "limit" as const, key: feature.code, title: feature.nameFa, value: row.limitValue, unit }];
+          }
+          return [{ kind: "feature" as const, key: feature.code, title: feature.nameFa, enabled: row.enabled }];
+        });
+        return {
+          code: plan.code,
+          display_name_fa: plan.nameFa,
+          description_fa: plan.description ?? "",
+          billing_cycle: plan.billingDays >= 360 ? "ANNUAL" : "MONTHLY",
+          price_amount: plan.priceIrr,
+          discount_percent: "0",
+          currency_code: "IRT",
+          is_popular: false,
+          is_active: plan.isActive,
+          features: assigned.filter((item) => item.kind === "feature").map((item) => ({
+            key: item.key, title_fa: item.title, is_enabled: item.enabled,
           })),
-      }))
-    );
+          limits: assigned.filter((item) => item.kind === "limit").map((item) => ({
+            key: item.key, title_fa: item.title, limit_value: item.value, limit_unit: item.unit,
+          })),
+        };
+      }),
+    });
   }
 
   // GET /api/v1/subscription/current
@@ -146,11 +205,18 @@ export async function handleSubscriptionRoutes(
     const ctx = await requireOrgContext(req, "subscriptions.upgrade");
     const body = z
       .object({
-        plan_code: z.string().min(2),
+        plan_code: z.string().min(2).optional(),
+        target_plan_code: z.string().min(2).optional(),
         gateway: z.enum(["ZARINPAL", "ZIBAL", "BALLEH_PAY", "SAMAN"]).optional(),
+        preferred_gateway: z.enum(["ZARINPAL", "ZIBAL", "BALLEH_PAY", "SAMAN"]).optional(),
         return_scheme: z.string().optional(),
+        return_deep_link: z.string().optional(),
       })
+      .refine((value) => Boolean(value.plan_code ?? value.target_plan_code), "plan_code is required")
       .parse(await req.json());
+    const planCode = body.plan_code ?? body.target_plan_code!;
+    const gateway = body.gateway ?? body.preferred_gateway;
+    const returnDeepLink = body.return_scheme ?? body.return_deep_link;
 
     const idemKey = req.headers.get("idempotency-key");
     const cached = await checkIdempotency({
@@ -167,12 +233,28 @@ export async function handleSubscriptionRoutes(
       userId: ctx.userId,
       userEmail: ctx.email,
       ipAddress: ctx.ipAddress,
-      planCode: body.plan_code,
-      gateway: body.gateway as PaymentGatewayCode | undefined,
-      returnDeepLink: body.return_scheme,
+      planCode,
+      gateway: gateway as PaymentGatewayCode | undefined,
+      returnDeepLink,
       originUrl,
       idempotencyKey: idemKey,
     });
+    const responseBody = {
+      ...orderRes,
+      outcome: "PAYMENT_REQUIRED",
+      invoice: null,
+      payment: {
+        payment_id: orderRes.payment_reference,
+        invoice_id: orderRes.order_id,
+        gateway: orderRes.gateway,
+        amount: orderRes.amount_irr,
+        currency_code: "IRR",
+        status: "REDIRECTED",
+        payment_url: orderRes.payment_url,
+        expires_at_ms: orderRes.expires_at.getTime(),
+      },
+      latest_snapshot: null,
+    };
 
     await saveIdempotency({
       organizationId: ctx.organizationId,
@@ -180,10 +262,134 @@ export async function handleSubscriptionRoutes(
       endpoint: "/api/v1/subscription/upgrade",
       payload: body,
       statusCode: 201,
-      responseBody: orderRes as unknown as Record<string, unknown>,
+      responseBody: responseBody as unknown as Record<string, unknown>,
     });
 
-    return ok(orderRes, 201);
+    return ok(responseBody, 201);
+  }
+
+  if (method === "POST" && sub === "renew") {
+    const ctx = await requireOrgContext(req, "subscriptions.upgrade");
+    const body = z.object({
+      billing_cycle: z.enum(["MONTHLY", "ANNUAL"]).optional(),
+      preferred_gateway: z.enum(["ZARINPAL", "ZIBAL", "BALLEH_PAY", "SAMAN"]).optional(),
+      return_deep_link: z.string().optional(),
+    }).parse(await req.json());
+    const idemKey = req.headers.get("idempotency-key");
+    const cached = await checkIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: "/api/v1/subscription/renew",
+      payload: body,
+    });
+    if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
+
+    const state = await resolveOrganizationEntitlements(ctx.organizationId);
+    const originUrl = req.nextUrl.origin || "http://127.0.0.1:3000";
+    const orderRes = await initiateSubscriptionUpgrade({
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      userEmail: ctx.email,
+      ipAddress: ctx.ipAddress,
+      planCode: state.planCode,
+      gateway: body.preferred_gateway as PaymentGatewayCode | undefined,
+      returnDeepLink: body.return_deep_link,
+      originUrl,
+      idempotencyKey: idemKey,
+    });
+    const responseBody = {
+      ...orderRes,
+      outcome: "PAYMENT_REQUIRED",
+      invoice: null,
+      payment: {
+        payment_id: orderRes.payment_reference,
+        invoice_id: orderRes.order_id,
+        gateway: orderRes.gateway,
+        amount: orderRes.amount_irr,
+        currency_code: "IRR",
+        status: "REDIRECTED",
+        payment_url: orderRes.payment_url,
+        expires_at_ms: orderRes.expires_at.getTime(),
+      },
+      latest_snapshot: null,
+    };
+    await saveIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: "/api/v1/subscription/renew",
+      payload: body,
+      statusCode: 201,
+      responseBody: responseBody as unknown as Record<string, unknown>,
+    });
+    return ok(responseBody, 201);
+  }
+
+  if (method === "POST" && sub === "cancel") {
+    const ctx = await requireOrgContext(req, "subscriptions.upgrade");
+    const body = z.object({
+      reason: z.string().max(500).optional(),
+      effective_at: z.enum(["END_OF_CYCLE", "NOW"]).default("END_OF_CYCLE"),
+    }).parse(await req.json());
+    const idemKey = req.headers.get("idempotency-key");
+    const cached = await checkIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: "/api/v1/subscription/cancel",
+      payload: body,
+    });
+    if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
+
+    const [latest] = await db.select().from(subscriptions)
+      .where(eq(subscriptions.organizationId, ctx.organizationId))
+      .orderBy(desc(subscriptions.expiresAt)).limit(1);
+    if (!latest) throw new ApiError(404, "SUBSCRIPTION_NOT_FOUND", "اشتراک فعالی برای لغو تمدید یافت نشد.");
+    await db.update(subscriptions).set({ autoRenew: false, updatedAt: new Date() }).where(eq(subscriptions.id, latest.id));
+    const [org] = await db.select({ entitlementVersion: organizations.entitlementVersion })
+      .from(organizations).where(eq(organizations.id, ctx.organizationId)).limit(1);
+    await db.update(organizations).set({ entitlementVersion: (org?.entitlementVersion ?? 1) + 1, updatedAt: new Date() })
+      .where(eq(organizations.id, ctx.organizationId));
+    const snapshot = await buildSignedEntitlementSnapshot(ctx.organizationId);
+    await saveIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: "/api/v1/subscription/cancel",
+      payload: body,
+      statusCode: 200,
+      responseBody: snapshot as unknown as Record<string, unknown>,
+    });
+    return ok(snapshot);
+  }
+
+  if (method === "GET" && sub === "invoices") {
+    const ctx = await requireOrgContext(req, "org.dashboard.read");
+    const rows = await db.select({ order: paymentOrders, plan: plans })
+      .from(paymentOrders)
+      .innerJoin(plans, eq(paymentOrders.planId, plans.id))
+      .where(and(eq(paymentOrders.organizationId, ctx.organizationId), ...(sub2 ? [eq(paymentOrders.id, sub2)] : [])))
+      .orderBy(desc(paymentOrders.createdAt));
+    const mapped = rows.map(({ order, plan }) => ({
+      invoice_id: order.id,
+      invoice_number: order.paymentReference,
+      plan_code: plan.code,
+      plan_name_fa: plan.nameFa,
+      billing_cycle: plan.billingDays >= 360 ? "ANNUAL" : "MONTHLY",
+      subtotal: order.amountIrr,
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      total_amount: order.amountIrr,
+      currency_code: order.currency === "IRR" ? "IRT" : order.currency,
+      status: order.status === "VERIFIED" ? "PAID" : order.status,
+      issued_at_ms: order.createdAt.getTime(),
+      due_at_ms: order.expiresAt.getTime(),
+      paid_at_ms: order.verifiedAt?.getTime() ?? null,
+      items: [{ title_fa: plan.nameFa, item_code: plan.code, quantity: 1, unit_amount: order.amountIrr, total_amount: order.amountIrr }],
+    }));
+    if (sub2) {
+      const invoice = mapped[0];
+      if (!invoice) throw new ApiError(404, "SUBSCRIPTION_INVOICE_NOT_FOUND", "فاکتور اشتراک یافت نشد.");
+      return ok(invoice);
+    }
+    return ok(mapped);
   }
 
   // GET /api/v1/subscription/orders/{reference} (Authoritative post-deep-link status check!)
@@ -267,6 +473,29 @@ export async function handleSubscriptionRoutes(
   if (method === "GET" && sub === "payments") {
     const ctx = await requireOrgContext(req, "org.dashboard.read");
     if (sub2) {
+      if (segments[3] === "status") {
+        const [order] = await db.select().from(paymentOrders)
+          .where(and(eq(paymentOrders.organizationId, ctx.organizationId), eq(paymentOrders.paymentReference, sub2)))
+          .limit(1);
+        if (!order) throw new ApiError(404, "PAYMENT_NOT_FOUND", "سفارش پرداخت یافت نشد.");
+        const snapshot = await buildSignedEntitlementSnapshot(ctx.organizationId);
+        const normalizedStatus = order.status === "VERIFIED" ? "PAID" : order.status;
+        return ok({
+          payment_id: order.paymentReference,
+          invoice_id: order.id,
+          organization_id: order.organizationId,
+          gateway: order.gateway,
+          amount: order.amountIrr,
+          currency_code: order.currency === "IRR" ? "IRT" : order.currency,
+          status: normalizedStatus,
+          reference_code: order.gatewayRefId,
+          failure_reason: normalizedStatus === "FAILED" ? String(order.callbackPayload?.message ?? "") : null,
+          verified_at_ms: order.verifiedAt?.getTime() ?? null,
+          subscription_activated: Boolean(order.subscriptionId && normalizedStatus === "PAID"),
+          entitlement_version: snapshot.entitlement_version,
+          latest_snapshot: normalizedStatus === "PAID" ? snapshot : null,
+        });
+      }
       const isUuidParam = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sub2);
       if (isUuidParam) {
         const [pay] = await db
@@ -701,6 +930,44 @@ export async function handlePaymentCallbackRoutes(
   segments: string[]
 ) {
   await ensureSeeded();
+
+  // Android payment-status contract: the path parameter is the opaque payment reference.
+  if (method === "GET" && segments[1] && segments[1] !== "callback" && segments[2] === "status") {
+    const ctx = await requireOrgContext(req, "org.dashboard.read");
+    const lookupKey = segments[1];
+    let order: typeof paymentOrders.$inferSelect | undefined;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lookupKey)) {
+      [order] = await db
+        .select()
+        .from(paymentOrders)
+        .where(and(eq(paymentOrders.id, lookupKey), eq(paymentOrders.organizationId, ctx.organizationId)))
+        .limit(1);
+    }
+    if (!order) {
+      [order] = await db
+        .select()
+        .from(paymentOrders)
+        .where(and(eq(paymentOrders.paymentReference, lookupKey), eq(paymentOrders.organizationId, ctx.organizationId)))
+        .limit(1);
+    }
+    if (!order) throw new ApiError(404, "PAYMENT_ORDER_NOT_FOUND", "سفارش پرداخت یافت نشد.");
+    const snapshot = await buildSignedEntitlementSnapshot(ctx.organizationId);
+    return ok({
+      payment_id: order.paymentReference,
+      invoice_id: order.id,
+      organization_id: order.organizationId,
+      gateway: order.gateway,
+      amount: order.amountIrr,
+      currency_code: order.currency,
+      status: order.status === "VERIFIED" ? "PAID" : order.status,
+      reference_code: order.gatewayRefId,
+      failure_reason: null,
+      verified_at_ms: order.verifiedAt?.getTime() ?? null,
+      subscription_activated: order.status === "VERIFIED",
+      entitlement_version: snapshot.entitlement_version,
+    });
+  }
+
   if (segments[1] !== "callback" || !segments[2]) {
     throw new ApiError(404, "ROUTE_NOT_FOUND", "مسیر بازگشت درگاه پرداخت یافت نشد.");
   }

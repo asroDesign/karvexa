@@ -19,7 +19,7 @@ import {
   warehouses,
 } from "@/db/schema";
 import { ensureSeeded } from "@/db/seed";
-import { addDec, formatDecimal, mulDec, subDec } from "@/lib/decimal";
+import { addDec, divDec, eqDec, formatDecimal, gtDec, isPositiveDec, mulDec, parseDecimal, subDec } from "@/lib/decimal";
 import {
   ApiError,
   applyListFilterAndPaginate,
@@ -29,6 +29,7 @@ import {
 } from "@/lib/errors";
 import { checkIdempotency, saveIdempotency } from "@/lib/idempotency";
 import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
+import { resolveCanonicalDate } from "@/lib/jalali";
 import {
   finalizePurchaseInvoice,
   finalizeSalesInvoice,
@@ -46,7 +47,58 @@ import {
   getConsignmentBalancesReport,
 } from "@/modules/consignment/service";
 import { accountingPolicies, accounts, contactTransactions, invoicePaymentAllocations } from "@/db/schema";
-import { gtDec, parseDecimal } from "@/lib/decimal";
+
+function calculateInvoiceAmounts<T extends { quantity: string; unit_price: string; discount_amount: string; tax_rate: string }>(
+  items: T[],
+  headerDiscount: string,
+  headerTax: string,
+  shipping: string,
+  otherCosts: string
+) {
+  let subtotal = BigInt(0);
+  let lineDiscountTotal = BigInt(0);
+  let lineTaxTotal = BigInt(0);
+  let taxableSubtotal = BigInt(0);
+  const lineItems = items.map((item) => {
+    const gross = mulDec(item.quantity, item.unit_price);
+    const discount = parseDecimal(item.discount_amount);
+    if (gtDec(discount, gross)) throw new ApiError(422, "LINE_DISCOUNT_EXCEEDS_AMOUNT", "تخفیف هر ردیف نمی‌تواند از مبلغ همان ردیف بیشتر باشد.");
+    const taxable = subDec(gross, discount);
+    const lineTax = mulDec(taxable, divDec(item.tax_rate, "100"));
+    subtotal = addDec(subtotal, gross);
+    lineDiscountTotal = addDec(lineDiscountTotal, discount);
+    lineTaxTotal = addDec(lineTaxTotal, lineTax);
+    taxableSubtotal = addDec(taxableSubtotal, taxable);
+    return { ...item, line_total: formatDecimal(gross, 2), line_discount_amount: formatDecimal(discount, 2), line_tax_amount: formatDecimal(lineTax, 2) };
+  });
+  const discountTotal = addDec(parseDecimal(headerDiscount), lineDiscountTotal);
+  if (gtDec(discountTotal, subtotal)) throw new ApiError(422, "DISCOUNT_EXCEEDS_SUBTOTAL", "مجموع تخفیف‌های ردیف و سربرگ نمی‌تواند از جمع کالاها بیشتر شود.");
+  const headerDiscountTaxBase = parseDecimal(headerDiscount);
+  const lineTaxAfterHeaderDiscount = isPositiveDec(headerDiscountTaxBase) && isPositiveDec(taxableSubtotal)
+    ? mulDec(lineTaxTotal, divDec(subDec(taxableSubtotal, headerDiscountTaxBase), taxableSubtotal))
+    : lineTaxTotal;
+  const taxTotal = isPositiveDec(headerTax) ? parseDecimal(headerTax) : lineTaxAfterHeaderDiscount;
+  if (!eqDec(taxTotal, lineTaxTotal)) {
+    let allocatedTax = BigInt(0);
+    for (let i = 0; i < lineItems.length; i += 1) {
+      const taxable = subDec(mulDec(lineItems[i].quantity, lineItems[i].unit_price), parseDecimal(lineItems[i].line_discount_amount));
+      const lineTax = i === lineItems.length - 1
+        ? subDec(taxTotal, allocatedTax)
+        : (isPositiveDec(taxableSubtotal) ? mulDec(taxTotal, divDec(taxable, taxableSubtotal)) : BigInt(0));
+      lineItems[i].line_tax_amount = formatDecimal(lineTax, 2);
+      allocatedTax = addDec(allocatedTax, lineTax);
+    }
+  }
+  const total = addDec(subDec(addDec(subtotal, taxTotal), discountTotal), addDec(shipping, otherCosts));
+  if (!isPositiveDec(total)) throw new ApiError(422, "INVOICE_TOTAL_INVALID", "مبلغ نهایی فاکتور باید بزرگ‌تر از صفر باشد.");
+  return {
+    subtotal: formatDecimal(subtotal, 2),
+    discountTotal: formatDecimal(discountTotal, 2),
+    taxTotal: formatDecimal(taxTotal, 2),
+    total: formatDecimal(total, 2),
+    lineItems,
+  };
+}
 import { createJournalEntryTx } from "@/modules/accounting/service";
 
 const cancelDocSchema = z.object({
@@ -56,6 +108,7 @@ const cancelDocSchema = z.object({
 const invoiceReturnSchema = z.object({
   notes: z.string().optional(),
   return_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  return_date_jalali: z.string().optional(),
   total_amount: z.string().regex(/^\d+(\.\d{1,2})?$/).optional(),
   reason: z.string().optional(),
   items: z
@@ -83,8 +136,11 @@ const invoiceCreateSchema = z.object({
   contact_id: z.string().uuid().optional(),
   warehouse_id: z.string().uuid(),
   document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  document_date_jalali: z.string().optional(),
   invoice_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  invoice_date_jalali: z.string().optional(),
   due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  due_date_jalali: z.string().optional(),
   currency: z.string().default("IRR"),
   exchange_rate: z.string().regex(/^\d+(\.\d{1,4})?$/).default("1.0000"),
   discount_total: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
@@ -214,16 +270,8 @@ export async function handleCommerceRoutes(
       const supplierId = body.supplier_id || body.contact_id;
       if (!supplierId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه تأمین‌کننده (supplier_id) الزامی است.");
 
-      let subtotal = BigInt(0);
-      const lineItems = body.items.map((it) => {
-        const lt = mulDec(it.quantity, it.unit_price);
-        subtotal = addDec(subtotal, lt);
-        return { ...it, line_total: formatDecimal(lt, 2) };
-      });
-      const grandTotal = addDec(
-        subDec(addDec(subtotal, body.tax_total), body.discount_total),
-        addDec(body.shipping_cost, body.other_costs)
-      );
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs);
+      const lineItems = totals.lineItems;
       const [policy] = await db
         .select()
         .from(accountingPolicies)
@@ -240,17 +288,17 @@ export async function handleCommerceRoutes(
             contactId: supplierId,
             warehouseId: body.warehouse_id,
             invoiceNumber: docNum,
-            invoiceDate: body.document_date || body.invoice_date || new Date().toISOString().slice(0, 10),
-            dueDate: body.due_date ?? null,
+            invoiceDate: resolveCanonicalDate(body.document_date || body.invoice_date, body.document_date_jalali || body.invoice_date_jalali),
+            dueDate: body.due_date_jalali ? resolveCanonicalDate(undefined, body.due_date_jalali) : body.due_date ?? null,
             currency: body.currency,
             exchangeRate: body.exchange_rate,
-            subtotal: formatDecimal(subtotal, 2),
-            discountAmount: body.discount_total,
-            taxAmount: body.tax_total,
+            subtotal: totals.subtotal,
+            discountAmount: totals.discountTotal,
+            taxAmount: totals.taxTotal,
             shippingCost: body.shipping_cost,
             otherCosts: body.other_costs,
-            totalAmount: formatDecimal(grandTotal, 2),
-            remainingAmount: formatDecimal(grandTotal, 2),
+            totalAmount: totals.total,
+            remainingAmount: totals.total,
             status: "DRAFT",
             relatedDocumentId: body.related_document_id ?? null,
             relatedDocumentType: body.related_document_type ?? null,
@@ -270,8 +318,12 @@ export async function handleCommerceRoutes(
               organizationId: ctx.organizationId,
               purchaseInvoiceId: inv.id,
               productId: li.product_id,
+              variantId: li.variant_id ?? null,
               quantity: li.quantity,
               unitPrice: li.unit_price,
+              discountAmount: li.line_discount_amount,
+              taxRate: li.tax_rate ?? "0.00",
+              taxAmount: li.line_tax_amount,
               lineTotal: li.line_total,
             }))
           )
@@ -386,7 +438,7 @@ export async function handleCommerceRoutes(
             organizationId: ctx.organizationId,
             invoiceId: inv.id,
             notes: body.notes ?? body.reason,
-            returnDate: body.return_date,
+            returnDate: resolveCanonicalDate(body.return_date, body.return_date_jalali),
             items: body.items,
             idempotencyKey: idemKey,
             actorUserId: ctx.userId,
@@ -552,16 +604,8 @@ export async function handleCommerceRoutes(
       const customerId = body.customer_id || body.contact_id;
       if (!customerId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه مشتری (customer_id) الزامی است.");
 
-      let subtotal = BigInt(0);
-      const lineItems = body.items.map((it) => {
-        const lt = mulDec(it.quantity, it.unit_price);
-        subtotal = addDec(subtotal, lt);
-        return { ...it, line_total: formatDecimal(lt, 2) };
-      });
-      const grandTotal = addDec(
-        subDec(addDec(subtotal, body.tax_total), body.discount_total),
-        addDec(body.shipping_cost, body.other_costs)
-      );
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs);
+      const lineItems = totals.lineItems;
       const [policy] = await db
         .select()
         .from(accountingPolicies)
@@ -579,17 +623,17 @@ export async function handleCommerceRoutes(
             contactId: customerId,
             warehouseId: body.warehouse_id,
             invoiceNumber: docNum,
-            invoiceDate: body.document_date || body.invoice_date || new Date().toISOString().slice(0, 10),
-            dueDate: body.due_date ?? null,
+            invoiceDate: resolveCanonicalDate(body.document_date || body.invoice_date, body.document_date_jalali || body.invoice_date_jalali),
+            dueDate: body.due_date_jalali ? resolveCanonicalDate(undefined, body.due_date_jalali) : body.due_date ?? null,
             currency: body.currency,
             exchangeRate: body.exchange_rate,
-            subtotal: formatDecimal(subtotal, 2),
-            discountAmount: body.discount_total,
-            taxAmount: body.tax_total,
+            subtotal: totals.subtotal,
+            discountAmount: totals.discountTotal,
+            taxAmount: totals.taxTotal,
             shippingCost: body.shipping_cost,
             otherCosts: body.other_costs,
-            totalAmount: formatDecimal(grandTotal, 2),
-            remainingAmount: formatDecimal(grandTotal, 2),
+            totalAmount: totals.total,
+            remainingAmount: totals.total,
             status: "DRAFT",
             relatedDocumentId: body.related_document_id ?? null,
             relatedDocumentType: body.related_document_type ?? null,
@@ -614,6 +658,7 @@ export async function handleCommerceRoutes(
               unitPrice: li.unit_price,
               discountAmount: li.discount_amount ?? "0.00",
               taxRate: li.tax_rate ?? "0.00",
+              taxAmount: li.line_tax_amount,
               lineTotal: li.line_total,
               description: li.description ?? null,
             }))
@@ -795,7 +840,7 @@ export async function handleCommerceRoutes(
             organizationId: ctx.organizationId,
             invoiceId: inv.id,
             notes: body.notes ?? body.reason,
-            returnDate: body.return_date,
+            returnDate: resolveCanonicalDate(body.return_date, body.return_date_jalali),
             items: body.items,
             idempotencyKey: idemKey,
             actorUserId: ctx.userId,
@@ -881,11 +926,32 @@ export async function handleCommerceRoutes(
           await requireOrgContext(req, "treasury.create", { requireActiveSubscription: true });
           const body = z
             .object({
-              account_id: z.string().uuid(),
+              account_id: z.string().uuid().optional(),
               amount: z.string().regex(/^\d+(\.\d{1,2})?$/),
               payment_method: z.enum(["CASH", "POS", "BANK_TRANSFER", "CARD", "WALLET", "CHEQUE", "OTHER"]).default("BANK_TRANSFER"),
               transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+              transaction_date_jalali: z.string().optional(),
               reference_number: z.string().optional(),
+              cheque: z.object({
+                cheque_number: z.string().min(3),
+                serial_number: z.string().min(2).optional(),
+                bank_name: z.string().min(2),
+                branch_name: z.string().optional(),
+                drawer_name: z.string().optional(),
+                issue_date: z.string().optional(),
+                issue_date_jalali: z.string().optional(),
+                due_date: z.string().optional(),
+                due_date_jalali: z.string().optional(),
+                notes: z.string().optional(),
+              }).optional(),
+            })
+            .superRefine((value, ctx) => {
+              if (value.payment_method === "CHEQUE" && !value.cheque) {
+                ctx.addIssue({ code: "custom", path: ["cheque"], message: "برای دریافت با چک، اطلاعات چک الزامی است." });
+              }
+              if (value.payment_method !== "CHEQUE" && !value.account_id) {
+                ctx.addIssue({ code: "custom", path: ["account_id"], message: "حساب خزانه الزامی است." });
+              }
             })
             .parse(await req.json());
           const idemKey = req.headers.get("idempotency-key");
@@ -893,11 +959,23 @@ export async function handleCommerceRoutes(
           const saved = await recordSubsequentInvoicePayment({
             organizationId: ctx.organizationId,
             invoiceId: inv.id,
-            financialAccountId: body.account_id,
+            financialAccountId: body.account_id ?? null,
             paymentMethod: normMethod,
             amount: body.amount,
-            paidAt: body.transaction_date || new Date().toISOString().slice(0, 10),
+            paidAt: resolveCanonicalDate(body.transaction_date, body.transaction_date_jalali) || new Date().toISOString().slice(0, 10),
             referenceNumber: body.reference_number ?? null,
+            cheque: body.cheque ? {
+              chequeNumber: body.cheque.cheque_number,
+              serialNumber: body.cheque.serial_number,
+              bankName: body.cheque.bank_name,
+              branchName: body.cheque.branch_name,
+              drawerName: body.cheque.drawer_name,
+              issueDate: body.cheque.issue_date,
+              issueDateJalali: body.cheque.issue_date_jalali,
+              dueDate: body.cheque.due_date,
+              dueDateJalali: body.cheque.due_date_jalali,
+              notes: body.cheque.notes,
+            } : null,
             idempotencyKey: idemKey,
             actorUserId: ctx.userId,
             actorEmail: ctx.email,

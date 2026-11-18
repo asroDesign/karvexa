@@ -106,10 +106,13 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
   }> = [
     { nature: "ASSET", code: "1202", name: "اسناد دریافتنی (چک‌های نزد صندوق)", accountType: "ASSET", normalBalance: "DEBIT", systemRole: "RECEIVABLE_CHEQUE" },
     { nature: "ASSET", code: "1203", name: "اسناد دریافتنی در جریان وصول", accountType: "ASSET", normalBalance: "DEBIT", systemRole: "CHEQUE_IN_COLLECTION" },
+    { nature: "ASSET", code: "1204", name: "مالیات بر ارزش افزوده خرید (اعتبار مالیاتی)", accountType: "ASSET", normalBalance: "DEBIT", systemRole: "TAX_RECEIVABLE" },
+    { nature: "ASSET", code: "1205", name: "پیش‌پرداخت و مطالبات از تأمین‌کنندگان", accountType: "ASSET", normalBalance: "DEBIT", systemRole: "SUPPLIER_ADVANCE" },
     { nature: "LIABILITY", code: "2301", name: "مالیات بر ارزش افزوده پرداختنی", accountType: "LIABILITY", normalBalance: "CREDIT", systemRole: "TAX_PAYABLE" },
     { nature: "EQUITY", code: "3201", name: "برداشت مالک / جاری شرکا", accountType: "EQUITY", normalBalance: "DEBIT", systemRole: "OWNER_DRAWINGS" },
     { nature: "EQUITY", code: "3301", name: "سود و زیان انباشته (خلاصه سود و زیان)", accountType: "EQUITY", normalBalance: "CREDIT", systemRole: "RETAINED_EARNINGS" },
     { nature: "REVENUE", code: "4102", name: "درآمد ارائه خدمات فنی و پشتیبانی", accountType: "REVENUE", normalBalance: "CREDIT", systemRole: "SERVICE_REVENUE" },
+    { nature: "REVENUE", code: "4201", name: "سایر درآمدهای عملیاتی", accountType: "REVENUE", normalBalance: "CREDIT", systemRole: "OTHER_INCOME" },
     { nature: "REVENUE", code: "4109", name: "تخفیفات نقدی و تجاری فروش (کاهنده)", accountType: "REVENUE", normalBalance: "DEBIT", systemRole: "SALES_DISCOUNT" },
     { nature: "EXPENSE", code: "5202", name: "هزینه حمل‌ونقل و پیک", accountType: "EXPENSE", normalBalance: "DEBIT", systemRole: "TRANSPORT_EXPENSE" },
     { nature: "EXPENSE", code: "5203", name: "هزینه اجاره محل کسب", accountType: "EXPENSE", normalBalance: "DEBIT", systemRole: "RENT_EXPENSE" },

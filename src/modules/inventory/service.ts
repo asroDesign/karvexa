@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   accounts,
@@ -18,11 +18,16 @@ import {
   warehouses,
   warehouseStockThresholds,
 } from "@/db/schema";
-import { createJournalEntryTx } from "@/modules/accounting/service";
+import {
+  assertAccountingDateWritableTx,
+  createJournalEntryTx,
+  JournalLineInput,
+} from "@/modules/accounting/service";
 import {
   addDec,
   divDec,
   formatDecimal,
+  gtDec,
   isNegativeDec,
   isPositiveDec,
   mulDec,
@@ -34,20 +39,21 @@ import { recordAuditLog } from "@/lib/audit";
 import { withTenantTransaction } from "@/lib/tenant";
 
 /**
- * Reads the latest Stock Ledger balance for (org, warehouse, product) under row lock.
+ * Reconstructs the current stock balance and FIFO layers for one locked SKU.
  */
 async function getCurrentStockStateTx(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   organizationId: string,
   warehouseId: string,
   productId: string,
-  variantId?: string | null
+  variantId?: string | null,
+  costingMethod: string = "WEIGHTED_AVERAGE"
 ) {
   // Deterministic advisory lock per (org, wh, prod, variant) prevents concurrent stock races
   const lockKey = `${organizationId}:${warehouseId}:${productId}:${variantId ?? "BASE"}`;
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
 
-  const [latest] = await tx
+  const movements = await tx
     .select()
     .from(stockLedger)
     .where(
@@ -58,22 +64,101 @@ async function getCurrentStockStateTx(
         variantId ? eq(stockLedger.variantId, variantId) : isNull(stockLedger.variantId)
       )
     )
-    .orderBy(desc(stockLedger.createdAt), desc(stockLedger.id))
-    .limit(1);
+    .orderBy(asc(stockLedger.movementDate), asc(stockLedger.createdAt), asc(stockLedger.id));
 
-  if (!latest) {
+  if (movements.length === 0) {
     return {
       qty: BigInt(0),
       value: BigInt(0),
       avgUnitCost: BigInt(0),
+      fifoLayers: [] as Array<{ qty: bigint; value: bigint }>,
+      latestMovementDate: null as string | null,
     };
   }
 
-  const qty = parseDecimal(latest.balanceAfterQty);
-  const value = parseDecimal(latest.balanceAfterValue);
+  let qty = BigInt(0);
+  let value = BigInt(0);
+  let shortageQty = BigInt(0);
+  const fifoLayers: Array<{ qty: bigint; value: bigint }> = [];
+  for (const movement of movements) {
+    const movementQty = parseDecimal(movement.quantityDelta);
+    const movementValue = parseDecimal(movement.valueDelta);
+    qty = addDec(qty, movementQty);
+    value = addDec(value, movementValue);
+    if (movementQty > BigInt(0)) {
+      let receivedQty = movementQty;
+      let receivedValue = movementValue;
+      if (shortageQty > BigInt(0)) {
+        const absorbedQty = receivedQty < shortageQty ? receivedQty : shortageQty;
+        const absorbedValue = absorbedQty === receivedQty
+          ? receivedValue
+          : mulDec(absorbedQty, divDec(receivedValue, receivedQty));
+        receivedQty = subDec(receivedQty, absorbedQty);
+        receivedValue = subDec(receivedValue, absorbedValue);
+        shortageQty = subDec(shortageQty, absorbedQty);
+      }
+      if (isPositiveDec(receivedQty)) fifoLayers.push({ qty: receivedQty, value: receivedValue });
+      continue;
+    }
+
+    let issueQty = -movementQty;
+    while (isPositiveDec(issueQty) && fifoLayers.length > 0) {
+      const layer = fifoLayers[0];
+      if (!isPositiveDec(layer.qty)) {
+        fifoLayers.shift();
+        continue;
+      }
+      const usedQty = issueQty < layer.qty ? issueQty : layer.qty;
+      const usedValue = usedQty === layer.qty ? layer.value : mulDec(usedQty, divDec(layer.value, layer.qty));
+      layer.qty = subDec(layer.qty, usedQty);
+      layer.value = subDec(layer.value, usedValue);
+      issueQty = subDec(issueQty, usedQty);
+      if (!isPositiveDec(layer.qty)) fifoLayers.shift();
+    }
+    shortageQty = addDec(shortageQty, issueQty);
+  }
+
+  // Reconcile legacy negative-stock or rounding history into a final layer so FIFO
+  // layers always represent the current ledger quantity and value exactly.
+  const positiveQty = fifoLayers.reduce((sum, layer) => addDec(sum, layer.qty), BigInt(0));
+  const positiveValue = fifoLayers.reduce((sum, layer) => addDec(sum, layer.value), BigInt(0));
+  if (isPositiveDec(qty)) {
+    if (gtDec(qty, positiveQty)) {
+      fifoLayers.push({ qty: subDec(qty, positiveQty), value: subDec(value, positiveValue) });
+    } else if (qty === positiveQty && fifoLayers.length > 0) {
+      fifoLayers[fifoLayers.length - 1].value = addDec(
+        fifoLayers[fifoLayers.length - 1].value,
+        subDec(value, positiveValue)
+      );
+    }
+  }
+
+  const [latest] = movements.slice(-1);
   const avgUnitCost = isPositiveDec(qty) ? divDec(value, qty) : parseDecimal(latest.unitCost);
 
-  return { qty, value, avgUnitCost };
+  return { qty, value, avgUnitCost, fifoLayers, latestMovementDate: latest.movementDate };
+}
+
+function calculateFifoIssueValue(
+  layers: Array<{ qty: bigint; value: bigint }>,
+  quantity: bigint,
+  fallbackUnitCost: bigint
+) {
+  let remainingQty = quantity;
+  let totalValue = BigInt(0);
+  for (const layer of layers) {
+    if (!isPositiveDec(remainingQty)) break;
+    if (!isPositiveDec(layer.qty)) continue;
+    const usedQty = remainingQty < layer.qty ? remainingQty : layer.qty;
+    if (isNegativeDec(layer.value)) {
+      throw new ApiError(409, "FIFO_LAYER_VALUE_INVALID", "لایه بهای FIFO موجودی ارزش منفی دارد و باید پیش از خروج انبار اصلاح شود.");
+    }
+    const usedValue = usedQty === layer.qty ? layer.value : mulDec(usedQty, divDec(layer.value, layer.qty));
+    totalValue = addDec(totalValue, usedValue);
+    remainingQty = subDec(remainingQty, usedQty);
+  }
+  if (isPositiveDec(remainingQty)) totalValue = addDec(totalValue, mulDec(remainingQty, fallbackUnitCost));
+  return totalValue;
 }
 
 export async function postStockDocumentTx(
@@ -93,6 +178,7 @@ export async function postStockDocumentTx(
       direction: "IN" | "OUT";
       quantity: string;
       unitCost?: string;
+      totalCost?: string;
     }>;
   }
 ) {
@@ -116,6 +202,7 @@ export async function postStockDocumentTx(
   if (!wh) {
     throw new ApiError(404, "WAREHOUSE_NOT_FOUND", "انبار انتخاب‌شده متعلق به این سازمان نیست.");
   }
+  await assertAccountingDateWritableTx(tx, params.organizationId, params.documentDate);
 
   const docNum = `SD-${Date.now().toString().slice(-7)}-${Math.floor(Math.random() * 900 + 100)}`;
 
@@ -158,14 +245,38 @@ export async function postStockDocumentTx(
     if (!prod) {
       throw new ApiError(404, "PRODUCT_NOT_FOUND", "کالای انتخاب‌شده متعلق به این سازمان نیست.");
     }
+    if (item.variantId) {
+      const [variant] = await tx
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(
+          and(
+            eq(productVariants.id, item.variantId),
+            eq(productVariants.organizationId, params.organizationId),
+            eq(productVariants.productId, item.productId)
+          )
+        )
+        .limit(1);
+      if (!variant) {
+        throw new ApiError(422, "PRODUCT_VARIANT_MISMATCH", "تنوع انتخاب‌شده به همین کالا و سازمان تعلق ندارد.");
+      }
+    }
 
     const current = await getCurrentStockStateTx(
       tx,
       params.organizationId,
       params.warehouseId,
       item.productId,
-      item.variantId ?? null
+      item.variantId ?? null,
+      prod.costingMethod
     );
+    if (current.latestMovementDate && params.documentDate < current.latestMovementDate) {
+      throw new ApiError(
+        409,
+        "BACKDATED_STOCK_MOVEMENT_NOT_SUPPORTED",
+        `تاریخ گردش کالا (${params.documentDate}) از آخرین گردش ثبت‌شده (${current.latestMovementDate}) قدیمی‌تر است؛ برای حفظ کاردکس و بهای FIFO، ابتدا تاریخ سند را اصلاح کنید.`
+      );
+    }
 
     const deltaQty = item.direction === "IN" ? qty : -qty;
     const nextQty = addDec(current.qty, deltaQty);
@@ -183,17 +294,40 @@ export async function postStockDocumentTx(
       }
     }
 
-    // Costing Valuation (WEIGHTED_AVERAGE or FIFO fallback to product default purchase price)
-    let unitCost = item.unitCost ? parseDecimal(item.unitCost) : BigInt(0);
-    if (item.direction === "OUT") {
+    // Persist the actual line value when supplied (e.g. allocated landed cost);
+    // otherwise value at the explicit cost or current weighted average.
+    let unitCost: bigint;
+    if (item.unitCost !== undefined) {
+      unitCost = parseDecimal(item.unitCost);
+      if (isNegativeDec(unitCost)) {
+        throw new ApiError(422, "UNIT_COST_NEGATIVE", "بهای واحد کالا نمی‌تواند منفی باشد.");
+      }
+    } else if (item.direction === "OUT" && prod.costingMethod !== "FIFO") {
       unitCost = isPositiveDec(current.avgUnitCost)
         ? current.avgUnitCost
         : parseDecimal(prod.defaultPurchasePrice);
-    } else if (!isPositiveDec(unitCost)) {
+    } else if (item.direction === "OUT") {
+      unitCost = isPositiveDec(current.avgUnitCost)
+        ? current.avgUnitCost
+        : parseDecimal(prod.defaultPurchasePrice);
+    } else {
       unitCost = parseDecimal(prod.defaultPurchasePrice);
     }
 
-    const lineValue = mulDec(qty, unitCost);
+    const lineValue = item.totalCost !== undefined
+      ? parseDecimal(item.totalCost)
+      : item.direction === "OUT" && prod.costingMethod === "FIFO"
+        ? calculateFifoIssueValue(current.fifoLayers, qty, unitCost)
+        : mulDec(qty, unitCost);
+    if (item.totalCost !== undefined && item.unitCost === undefined) {
+      unitCost = divDec(lineValue, qty);
+    }
+    if (item.totalCost === undefined && item.direction === "OUT" && prod.costingMethod === "FIFO") {
+      unitCost = divDec(lineValue, qty);
+    }
+    if (isNegativeDec(lineValue)) {
+      throw new ApiError(422, "TOTAL_COST_NEGATIVE", "ارزش کل گردش کالا نمی‌تواند منفی باشد.");
+    }
     const deltaValue = item.direction === "IN" ? lineValue : -lineValue;
     const nextValue = addDec(current.value, deltaValue);
     totalCostValue = addDec(totalCostValue, lineValue);
@@ -262,6 +396,12 @@ export async function executeAtomicWarehouseTransfer(params: {
   }
 
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    const skuLocks = [params.sourceWarehouseId, params.targetWarehouseId]
+      .map((warehouseId) => `${params.organizationId}:${warehouseId}:${params.productId}:BASE`)
+      .sort();
+    for (const lockKey of skuLocks) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
+    }
     const outRes = await postStockDocumentTx(tx, {
       organizationId: params.organizationId,
       warehouseId: params.sourceWarehouseId,
@@ -295,6 +435,7 @@ export async function executeAtomicWarehouseTransfer(params: {
           direction: "IN",
           quantity: params.quantity,
           unitCost: transferredUnitCost,
+          totalCost: outRes.totalCostValue,
         },
       ],
     });
@@ -362,12 +503,38 @@ export async function approveStockCount(params: {
   ipAddress?: string | null;
 }) {
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    await assertAccountingDateWritableTx(tx, params.organizationId, params.countDate);
     const countNumber = `SC-${Date.now().toString().slice(-6)}`;
+    const productIds = [...new Set(params.items.map((item) => item.productId))];
+    if (productIds.length !== params.items.length) {
+      throw new ApiError(422, "DUPLICATE_COUNT_PRODUCT", "هر کالا باید فقط یک‌بار در یک سند انبارگردانی ثبت شود.");
+    }
+    const [warehouse] = await tx
+      .select({ id: warehouses.id })
+      .from(warehouses)
+      .where(
+        and(
+          eq(warehouses.id, params.warehouseId),
+          eq(warehouses.organizationId, params.organizationId),
+          eq(warehouses.isActive, true)
+        )
+      )
+      .limit(1);
+    if (!warehouse) throw new ApiError(404, "WAREHOUSE_NOT_FOUND", "انبار فعال متعلق به این سازمان یافت نشد.");
+    const scopedProducts = await tx
+      .select({ id: products.id, costingMethod: products.costingMethod, defaultPurchasePrice: products.defaultPurchasePrice })
+      .from(products)
+      .where(and(eq(products.organizationId, params.organizationId), inArray(products.id, productIds)));
+    if (scopedProducts.length !== productIds.length) {
+      throw new ApiError(403, "PRODUCT_NOT_FOUND", "یکی از کالاهای انبارگردانی متعلق به این سازمان نیست.");
+    }
+
     const evaluatedItems: Array<{
       productId: string;
       systemQty: bigint;
       countedQty: bigint;
       varianceQty: bigint;
+      adjustmentUnitCost: bigint;
     }> = [];
 
     for (const item of params.items) {
@@ -375,8 +542,14 @@ export async function approveStockCount(params: {
         tx,
         params.organizationId,
         params.warehouseId,
-        item.productId
+        item.productId,
+        null,
+        scopedProducts.find((product) => product.id === item.productId)?.costingMethod ?? "WEIGHTED_AVERAGE"
       );
+      if (current.latestMovementDate && params.countDate < current.latestMovementDate) {
+        throw new ApiError(409, "BACKDATED_STOCK_COUNT_NOT_SUPPORTED", "تاریخ انبارگردانی از آخرین گردش ثبت‌شده کالا قدیمی‌تر است؛ موجودی را در تاریخ جاری انبارگردانی کنید.");
+      }
+      const product = scopedProducts.find((entry) => entry.id === item.productId)!;
       const counted = parseDecimal(item.countedQty);
       if (isNegativeDec(counted)) {
         throw new ApiError(422, "COUNTED_QTY_NEGATIVE", "مقدار شمارش‌شده نمی‌تواند منفی باشد.");
@@ -387,6 +560,11 @@ export async function approveStockCount(params: {
         systemQty: current.qty,
         countedQty: counted,
         varianceQty: variance,
+        adjustmentUnitCost: product.costingMethod === "FIFO" && current.fifoLayers.length > 0
+          ? divDec(current.fifoLayers[current.fifoLayers.length - 1].value, current.fifoLayers[current.fifoLayers.length - 1].qty)
+          : isPositiveDec(current.avgUnitCost)
+            ? current.avgUnitCost
+            : parseDecimal(product.defaultPurchasePrice),
       });
     }
 
@@ -399,9 +577,13 @@ export async function approveStockCount(params: {
           isPositiveDec(i.varianceQty) ? i.varianceQty : -i.varianceQty,
           4
         ),
+        ...(isPositiveDec(i.varianceQty)
+          ? { unitCost: formatDecimal(i.adjustmentUnitCost, 4) }
+          : {}),
       }));
 
     let adjustmentDocId: string | null = null;
+    let adjustmentJournal = null;
     if (adjustmentItems.length > 0) {
       const adjRes = await postStockDocumentTx(tx, {
         organizationId: params.organizationId,
@@ -414,6 +596,56 @@ export async function approveStockCount(params: {
         items: adjustmentItems,
       });
       adjustmentDocId = adjRes.document.id;
+
+      let inventoryIncrease = BigInt(0);
+      let inventoryDecrease = BigInt(0);
+      for (const ledgerRow of adjRes.ledgerRows) {
+        const value = parseDecimal(ledgerRow.valueDelta);
+        if (ledgerRow.movementType === "IN") inventoryIncrease = addDec(inventoryIncrease, value);
+        if (ledgerRow.movementType === "OUT") inventoryDecrease = addDec(inventoryDecrease, -value);
+      }
+
+      const orgAccounts = await tx
+        .select()
+        .from(accounts)
+        .where(eq(accounts.organizationId, params.organizationId));
+      const inventoryAccount = orgAccounts.find((account) => account.systemRole === "INVENTORY");
+      const cogsAccount = orgAccounts.find((account) => account.systemRole === "COGS");
+      if (!inventoryAccount || !cogsAccount) {
+        throw new ApiError(422, "STOCK_COUNT_ACCOUNT_MAPPING_MISSING", "برای ثبت مالی انبارگردانی، حساب موجودی و بهای تمام‌شده باید تعریف شده باشند.");
+      }
+
+      const journalLines: JournalLineInput[] = [];
+      if (isPositiveDec(inventoryIncrease)) {
+        journalLines.push(
+          { accountId: inventoryAccount.id, debit: formatDecimal(inventoryIncrease, 2), credit: "0.00", description: `افزایش موجودی طبق انبارگردانی ${countNumber}` },
+          { accountId: cogsAccount.id, debit: "0.00", credit: formatDecimal(inventoryIncrease, 2), description: `کاهش بهای تمام‌شده بابت کسری کمتر از سیستم ${countNumber}` }
+        );
+      }
+      if (isPositiveDec(inventoryDecrease)) {
+        journalLines.push(
+          { accountId: cogsAccount.id, debit: formatDecimal(inventoryDecrease, 2), credit: "0.00", description: `زیان کسری موجودی طبق انبارگردانی ${countNumber}` },
+          { accountId: inventoryAccount.id, debit: "0.00", credit: formatDecimal(inventoryDecrease, 2), description: `کاهش موجودی طبق انبارگردانی ${countNumber}` }
+        );
+      }
+      if (journalLines.length >= 2) {
+        const journal = await createJournalEntryTx(tx, {
+          organizationId: params.organizationId,
+          actorUserId: params.actorUserId,
+          actorEmail: params.actorEmail,
+          entryDate: params.countDate,
+          description: `سند مالی انبارگردانی ${countNumber}`,
+          referenceType: "STOCK_COUNT",
+          referenceId: adjRes.document.id,
+          postImmediately: true,
+          lines: journalLines,
+        });
+        adjustmentJournal = journal.entry;
+        await tx
+          .update(stockDocuments)
+          .set({ journalEntryId: adjustmentJournal.id })
+          .where(eq(stockDocuments.id, adjRes.document.id));
+      }
     }
 
     const [countDoc] = await tx
@@ -430,6 +662,13 @@ export async function approveStockCount(params: {
       })
       .returning();
 
+    if (adjustmentDocId) {
+      await tx
+        .update(stockDocuments)
+        .set({ referenceId: countDoc.id })
+        .where(eq(stockDocuments.id, adjustmentDocId));
+    }
+
     const savedItems = await tx
       .insert(stockCountItems)
       .values(
@@ -444,7 +683,12 @@ export async function approveStockCount(params: {
       )
       .returning();
 
-    return { countDoc, items: savedItems, adjustmentDocumentId: adjustmentDocId };
+    return {
+      countDoc,
+      items: savedItems,
+      adjustmentDocumentId: adjustmentDocId,
+      journalEntry: adjustmentJournal,
+    };
   });
 
   await recordAuditLog({
@@ -459,6 +703,7 @@ export async function approveStockCount(params: {
     metadata: {
       countNumber: result.countDoc.countNumber,
       adjustmentDocumentId: result.adjustmentDocumentId,
+      journalEntryId: result.journalEntry?.id ?? null,
     },
   });
 
@@ -468,7 +713,7 @@ export async function approveStockCount(params: {
 /**
  * Reconstructs current on-hand stock quantities & valuations strictly from `stock_ledger`.
  */
-export async function getLiveStockBalances(organizationId: string) {
+export async function getLiveStockBalances(organizationId: string, asOfDate?: string) {
   const [rows, allVariants] = await Promise.all([
     db
       .select({
@@ -485,7 +730,14 @@ export async function getLiveStockBalances(organizationId: string) {
       .from(stockLedger)
       .innerJoin(warehouses, eq(stockLedger.warehouseId, warehouses.id))
       .innerJoin(products, eq(stockLedger.productId, products.id))
-      .where(eq(stockLedger.organizationId, organizationId)),
+      .where(
+        asOfDate
+          ? and(
+              eq(stockLedger.organizationId, organizationId),
+              lte(stockLedger.movementDate, asOfDate)
+            )
+          : eq(stockLedger.organizationId, organizationId)
+      ),
     db.select().from(productVariants).where(eq(productVariants.organizationId, organizationId)),
   ]);
 

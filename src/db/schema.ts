@@ -1089,6 +1089,9 @@ export const purchaseInvoiceItems = pgTable(
     variantId: uuid("variant_id"),
     quantity: numeric("quantity", { precision: 18, scale: 4 }).notNull(),
     unitPrice: numeric("unit_price", { precision: 18, scale: 2 }).notNull(),
+    discountAmount: numeric("discount_amount", { precision: 18, scale: 2 }).notNull().default("0.00"),
+    taxRate: numeric("tax_rate", { precision: 8, scale: 2 }).notNull().default("0.00"),
+    taxAmount: numeric("tax_amount", { precision: 18, scale: 2 }).notNull().default("0.00"),
     lineTotal: numeric("line_total", { precision: 18, scale: 2 }).notNull(),
   },
   (t) => [index("idx_purchase_items_org").on(t.organizationId, t.purchaseInvoiceId)]

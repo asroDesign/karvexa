@@ -86,6 +86,17 @@ export function jalaliToGregorianIso(jalaliStr: string): string {
   return `${String(gy).padStart(4, "0")}-${String(gm).padStart(2, "0")}-${String(gd).padStart(2, "0")}`;
 }
 
+export function currentJalaliDate(now: Date = new Date(), timeZone = "Asia/Tehran"): string {
+  const parts = new Intl.DateTimeFormat("en-US-u-ca-persian", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone,
+  }).formatToParts(now);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}/${part("month")}/${part("day")}`;
+}
+
 export function gregorianIsoToJalali(isoDate: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate.trim());
   if (!m) return isoDate;

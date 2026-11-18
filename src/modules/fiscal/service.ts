@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   accountClosures,
@@ -28,10 +28,11 @@ import {
 import { ApiError } from "@/lib/errors";
 import { withTenantTransaction } from "@/lib/tenant";
 import {
+  assertAccountingDateWritableTx,
   buildAccountingReports,
   createJournalEntryTx,
   JournalLineInput,
-  reverseJournalEntry,
+  reverseJournalEntryTx,
 } from "@/modules/accounting/service";
 import { getLiveStockBalances } from "@/modules/inventory/service";
 
@@ -195,7 +196,19 @@ export async function postOpeningBalances(params: {
  * Master Prompt 06 §7.6 & Test F — Account Closure Preview & Controlled Closure
  */
 export async function getAccountClosurePreview(organizationId: string, accountId: string) {
-  const bal = await getAccountLiveBalance(organizationId, accountId);
+  const [bal, activeChildren] = await Promise.all([
+    getAccountLiveBalance(organizationId, accountId),
+    db
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.organizationId, organizationId),
+          eq(accounts.parentId, accountId),
+          eq(accounts.isActive, true)
+        )
+      ),
+  ]);
   const nonZero = !isZeroDec(bal.netBalance);
   const hasDrafts = bal.draftLinesCount > 0;
   const isSystem = Boolean(bal.account.systemRole);
@@ -207,6 +220,9 @@ export async function getAccountClosurePreview(organizationId: string, accountId
   if (isSystem) {
     blockers.push(`حساب سیستمی (${bal.account.systemRole}) برای عملیات خودکار سیستم نیاز است و قابل بستن مستقیم نیست.`);
   }
+  if (activeChildren.length > 0) {
+    blockers.push(`${activeChildren.length} زیرحساب فعال به این حساب متصل است؛ ابتدا زیرحساب‌ها را تعیین تکلیف کنید.`);
+  }
 
   return {
     account: bal.account,
@@ -216,7 +232,8 @@ export async function getAccountClosurePreview(organizationId: string, accountId
     has_non_zero_balance: nonZero,
     posted_lines_count: bal.postedLinesCount,
     draft_lines_count: bal.draftLinesCount,
-    can_close_directly: !nonZero && !hasDrafts && !isSystem,
+    active_children_count: activeChildren.length,
+    can_close_directly: !nonZero && !hasDrafts && !isSystem && activeChildren.length === 0,
     requires_balance_resolution: nonZero,
     recommended_actions: nonZero
       ? ["TRANSFER", "SETTLE", "ADJUST"]
@@ -235,45 +252,41 @@ export async function closeAccountControlled(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const preview = await getAccountClosurePreview(params.organizationId, params.accountId);
-  if (preview.account.accountStatus === "CLOSED" || !preview.account.isActive) {
-    throw new ApiError(409, "ACCOUNT_ALREADY_CLOSED", "این حساب قبلاً بسته شده است.");
-  }
-  if (preview.draft_lines_count > 0) {
-    throw new ApiError(
-      409,
-      "ACCOUNT_HAS_DRAFT_POSTINGS",
-      "ابتدا اسناد پیش‌نویس مرتبط با این حساب را قطعی یا حذف کنید."
-    );
-  }
-  if (preview.account.systemRole) {
-    throw new ApiError(
-      409,
-      "SYSTEM_ACCOUNT_PROTECTED",
-      "حساب‌های سیستمی بدون مجوز ویژه قابل بستن نیستند."
-    );
-  }
-
-  const netDec = parseDecimal(preview.net_balance);
-  const hasBalance = !isZeroDec(netDec);
-
-  if (hasBalance && params.actionType === "CLOSE_ONLY") {
-    throw new ApiError(
-      409,
-      "ACCOUNT_BALANCE_NON_ZERO",
-      `امکان بستن حساب «${preview.account.name}» با مانده غیرصفر (${preview.net_balance}) بدون تسویه یا انتقال مانده وجود ندارد. لطفاً حساب مقصد جهت انتقال مانده انتخاب کنید.`
-    );
-  }
-
-  if (hasBalance && !params.destinationAccountId) {
-    throw new ApiError(
-      422,
-      "DESTINATION_ACCOUNT_REQUIRED",
-      "برای انتقال یا تسویه مانده حساب، انتخاب حساب مقصد (destination_account_id) الزامی است."
-    );
-  }
-
+  const closingDate = new Date().toISOString().slice(0, 10);
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    const dateContext = await assertAccountingDateWritableTx(tx, params.organizationId, closingDate);
+    await tx.execute(sql`
+      SELECT id FROM accounts
+      WHERE id = ${params.accountId}
+        AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
+    const preview = await getAccountClosurePreview(params.organizationId, params.accountId);
+    if (preview.account.accountStatus === "CLOSED" || !preview.account.isActive) {
+      throw new ApiError(409, "ACCOUNT_ALREADY_CLOSED", "این حساب قبلاً بسته شده است.");
+    }
+    if (preview.draft_lines_count > 0) {
+      throw new ApiError(409, "ACCOUNT_HAS_DRAFT_POSTINGS", "ابتدا اسناد پیش‌نویس مرتبط با این حساب را قطعی یا حذف کنید.");
+    }
+    if (preview.account.systemRole) {
+      throw new ApiError(409, "SYSTEM_ACCOUNT_PROTECTED", "حساب‌های سیستمی بدون مجوز ویژه قابل بستن مستقیم نیستند.");
+    }
+    if (preview.active_children_count > 0) {
+      throw new ApiError(409, "ACCOUNT_HAS_ACTIVE_CHILDREN", "ابتدا زیرحساب‌های فعال را تعیین تکلیف کنید.");
+    }
+    const netDec = parseDecimal(preview.net_balance);
+    const hasBalance = !isZeroDec(netDec);
+    if (hasBalance && params.actionType === "CLOSE_ONLY") {
+      throw new ApiError(
+        409,
+        "ACCOUNT_BALANCE_NON_ZERO",
+        `امکان بستن حساب «${preview.account.name}» با مانده غیرصفر (${preview.net_balance}) بدون تسویه یا انتقال مانده وجود ندارد.`
+      );
+    }
+    if (hasBalance && !params.destinationAccountId) {
+      throw new ApiError(422, "DESTINATION_ACCOUNT_REQUIRED", "برای انتقال مانده، انتخاب حساب مقصد الزامی است.");
+    }
+
     let transferJournal = null;
 
     if (hasBalance && params.destinationAccountId) {
@@ -323,7 +336,9 @@ export async function closeAccountControlled(params: {
         organizationId: params.organizationId,
         actorUserId: params.actorUserId,
         actorEmail: params.actorEmail,
-        entryDate: new Date().toISOString().slice(0, 10),
+        fiscalYearId: dateContext.fiscalYear.id,
+        accountingPeriodId: dateContext.period.id,
+        entryDate: closingDate,
         description: `سند انتقال مانده و بستن حساب ${preview.account.code} (${preview.account.name}) — ${params.reason}`,
         referenceType: "ACCOUNT_CLOSURE",
         referenceId: params.accountId,
@@ -342,8 +357,10 @@ export async function closeAccountControlled(params: {
         closedAt: now,
         closedBy: params.actorUserId,
         closureReason: params.reason,
+        version: preview.account.version + 1,
+        updatedAt: now,
       })
-      .where(eq(accounts.id, params.accountId))
+      .where(and(eq(accounts.id, params.accountId), eq(accounts.organizationId, params.organizationId)))
       .returning();
 
     const [closureRecord] = await tx
@@ -361,7 +378,7 @@ export async function closeAccountControlled(params: {
       })
       .returning();
 
-    return { account: closedAcc, closure: closureRecord, transferJournal };
+    return { account: closedAcc, closure: closureRecord, transferJournal, closingBalance: preview.net_balance };
   });
 
   await recordAuditLog({
@@ -375,7 +392,7 @@ export async function closeAccountControlled(params: {
     ipAddress: params.ipAddress,
     metadata: {
       actionType: params.actionType,
-      closingBalance: preview.net_balance,
+      closingBalance: result.closingBalance,
       transferJournalId: result.transferJournal?.id ?? null,
       reason: params.reason,
     },
@@ -388,7 +405,7 @@ export async function closeAccountControlled(params: {
 // FISCAL YEAR LIFECYCLE (§8 & §9 — Tests G, H, I, J)
 // ============================================================================
 
-export async function createFiscalYearWithPeriods(params: {
+type CreateFiscalYearParams = {
   organizationId: string;
   name: string;
   startDate: string;
@@ -400,62 +417,68 @@ export async function createFiscalYearWithPeriods(params: {
   actorUserId: string;
   actorEmail: string;
   ipAddress?: string | null;
-}) {
+};
+
+async function createFiscalYearWithPeriodsTx(
+  tx: Parameters<Parameters<typeof withTenantTransaction>[1]>[0],
+  params: CreateFiscalYearParams
+) {
+  const [fy] = await tx
+    .insert(fiscalYears)
+    .values({
+      organizationId: params.organizationId,
+      name: params.name.trim(),
+      startDate: params.startDate,
+      endDate: params.endDate,
+      calendarSystem: params.calendarSystem ?? "PERSIAN",
+      currency: params.currency ?? "IRR",
+      status: params.status ?? "OPEN",
+      isDefault: false,
+      previousFiscalYearId: params.previousFiscalYearId ?? null,
+    })
+    .returning();
+
+  const startMs = Date.parse(`${params.startDate}T00:00:00Z`);
+  const endMs = Date.parse(`${params.endDate}T00:00:00Z`);
+  const qSpan = Math.floor((endMs - startMs) / 4);
+  const periodNames = ["فصل اول (بهار)", "فصل دوم (تابستان)", "فصل سوم (پاییز)", "فصل چهارم (زمستان)"];
+  const periodRows = periodNames.map((pName, idx) => {
+    const pStart = new Date(startMs + idx * qSpan + (idx === 0 ? 0 : 86400_000));
+    const pEnd = idx === 3 ? new Date(endMs) : new Date(startMs + (idx + 1) * qSpan);
+    return {
+      organizationId: params.organizationId,
+      fiscalYearId: fy.id,
+      name: `${pName} — ${fy.name}`,
+      periodNumber: idx + 1,
+      startDate: pStart.toISOString().slice(0, 10),
+      endDate: pEnd.toISOString().slice(0, 10),
+      status: "OPEN",
+    };
+  });
+  const createdPeriods = await tx.insert(accountingPeriods).values(periodRows).returning();
+
+  if (params.previousFiscalYearId) {
+    const [previous] = await tx
+      .update(fiscalYears)
+      .set({ nextFiscalYearId: fy.id })
+      .where(and(
+        eq(fiscalYears.id, params.previousFiscalYearId),
+        eq(fiscalYears.organizationId, params.organizationId),
+        sql`next_fiscal_year_id IS NULL`
+      ))
+      .returning({ id: fiscalYears.id });
+    if (!previous) throw new ApiError(409, "NEXT_FISCAL_YEAR_ALREADY_EXISTS", "سال مالی بعدی قبلاً از این سال مالی ایجاد شده است.");
+  }
+
+  return { fiscalYear: fy, periods: createdPeriods };
+}
+
+export async function createFiscalYearWithPeriods(params: CreateFiscalYearParams) {
   if (params.startDate >= params.endDate) {
     throw new ApiError(422, "FISCAL_DATE_RANGE_INVALID", "تاریخ شروع سال مالی باید قبل از تاریخ پایان باشد.");
   }
 
-  const created = await withTenantTransaction(params.organizationId, async (tx) => {
-    const [fy] = await tx
-      .insert(fiscalYears)
-      .values({
-        organizationId: params.organizationId,
-        name: params.name.trim(),
-        startDate: params.startDate,
-        endDate: params.endDate,
-        calendarSystem: params.calendarSystem ?? "PERSIAN",
-        currency: params.currency ?? "IRR",
-        status: params.status ?? "OPEN",
-        isDefault: false,
-        previousFiscalYearId: params.previousFiscalYearId ?? null,
-      })
-      .returning();
-
-    // Auto-create 4 quarterly accounting periods spanning startDate..endDate
-    const startMs = Date.parse(`${params.startDate}T00:00:00Z`);
-    const endMs = Date.parse(`${params.endDate}T00:00:00Z`);
-    const qSpan = Math.floor((endMs - startMs) / 4);
-    const periodNames = ["فصل اول (بهار)", "فصل دوم (تابستان)", "فصل سوم (پاییز)", "فصل چهارم (زمستان)"];
-    const periodRows = periodNames.map((pName, idx) => {
-      const pStart = new Date(startMs + idx * qSpan + (idx === 0 ? 0 : 86400_000));
-      const pEnd = idx === 3 ? new Date(endMs) : new Date(startMs + (idx + 1) * qSpan);
-      return {
-        organizationId: params.organizationId,
-        fiscalYearId: fy.id,
-        name: `${pName} — ${fy.name}`,
-        periodNumber: idx + 1,
-        startDate: pStart.toISOString().slice(0, 10),
-        endDate: pEnd.toISOString().slice(0, 10),
-        status: "OPEN",
-      };
-    });
-
-    const createdPeriods = await tx.insert(accountingPeriods).values(periodRows).returning();
-
-    if (params.previousFiscalYearId) {
-      await tx
-        .update(fiscalYears)
-        .set({ nextFiscalYearId: fy.id })
-        .where(
-          and(
-            eq(fiscalYears.id, params.previousFiscalYearId),
-            eq(fiscalYears.organizationId, params.organizationId)
-          )
-        );
-    }
-
-    return { fiscalYear: fy, periods: createdPeriods };
-  });
+  const created = await withTenantTransaction(params.organizationId, (tx) => createFiscalYearWithPeriodsTx(tx, params));
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -501,17 +524,31 @@ export async function runPreClosingChecklist(organizationId: string, fiscalYearI
       db
         .select()
         .from(salesInvoices)
-        .where(and(eq(salesInvoices.organizationId, organizationId), eq(salesInvoices.status, "DRAFT"))),
+        .where(
+          and(
+            eq(salesInvoices.organizationId, organizationId),
+            eq(salesInvoices.status, "DRAFT"),
+            gte(salesInvoices.invoiceDate, fy.startDate),
+            lte(salesInvoices.invoiceDate, fy.endDate)
+          )
+        ),
       db
         .select()
         .from(purchaseInvoices)
-        .where(and(eq(purchaseInvoices.organizationId, organizationId), eq(purchaseInvoices.status, "DRAFT"))),
+        .where(
+          and(
+            eq(purchaseInvoices.organizationId, organizationId),
+            eq(purchaseInvoices.status, "DRAFT"),
+            gte(purchaseInvoices.invoiceDate, fy.startDate),
+            lte(purchaseInvoices.invoiceDate, fy.endDate)
+          )
+        ),
       db
         .select()
         .from(accounts)
         .where(and(eq(accounts.organizationId, organizationId), eq(accounts.systemRole, "RETAINED_EARNINGS")))
         .limit(1),
-      getLiveStockBalances(organizationId),
+      getLiveStockBalances(organizationId, fy.endDate),
     ]);
 
   const items: Array<{
@@ -558,9 +595,22 @@ export async function runPreClosingChecklist(organizationId: string, fiscalYearI
     {
       code: "INVENTORY_VALUATION",
       title: "ارزیابی موجودی انبار (Stock Ledger)",
-      status: "PASSED",
-      critical: false,
-      details: `ارزش کل موجودی انبار: ${stock.totalValuation}`,
+      status:
+        stock.balances.some((balance) => isNegativeDec(parseDecimal(balance.onHandQty)) || isNegativeDec(parseDecimal(balance.totalValue)))
+          ? "FAILED"
+          : stock.balances.some(
+                (balance) =>
+                  isPositiveDec(parseDecimal(balance.onHandQty)) &&
+                  isZeroDec(parseDecimal(balance.totalValue))
+              )
+            ? "WARNING"
+            : "PASSED",
+      critical: stock.balances.some(
+        (balance) =>
+          isNegativeDec(parseDecimal(balance.onHandQty)) ||
+          isNegativeDec(parseDecimal(balance.totalValue))
+      ),
+      details: `ارزش کل موجودی: ${stock.totalValuation} | موجودی منفی: ${stock.balances.filter((balance) => isNegativeDec(parseDecimal(balance.onHandQty))).length} | موجودی بدون ارزش‌گذاری: ${stock.balances.filter((balance) => isPositiveDec(parseDecimal(balance.onHandQty)) && isZeroDec(parseDecimal(balance.totalValue))).length}`,
     },
     {
       code: "FIXED_ASSETS_DEPRECIATION",
@@ -735,31 +785,55 @@ export async function executeFiscalYearClosing(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const checklist = await runPreClosingChecklist(params.organizationId, params.fiscalYearId);
-  if (checklist.fiscal_year.status === "CLOSED") {
-    throw new ApiError(409, "FISCAL_YEAR_ALREADY_CLOSED", "این سال مالی قبلاً بسته شده است.");
-  }
-  if (checklist.critical_failures > 0) {
-    throw new ApiError(
-      409,
-      "PRE_CLOSING_CHECKLIST_FAILED",
-      "خطاهای بحرانی در چک‌لیست پیش از بستن سال مالی وجود دارد و بستن سال مسدود است."
-    );
-  }
-  if (checklist.warnings_count > 0 && !params.acknowledgeWarnings) {
-    throw new ApiError(
-      422,
-      "WARNINGS_ACKNOWLEDGMENT_REQUIRED",
-      `تعداد ${checklist.warnings_count} هشدار در چک‌لیست وجود دارد؛ برای ادامه باید acknowledge_warnings = true تایید شود.`
-    );
-  }
-
-  const preview = await buildFiscalYearClosingPreview(params.organizationId, params.fiscalYearId);
-  if (!preview.is_balanced) {
-    throw new ApiError(409, "CLOSING_JOURNAL_UNBALANCED", "سند اختتامیه محاسبه‌شده تراز نیست.");
-  }
-
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    // Keep the fiscal year locked while re-running the checklist and preview.
+    // Journal writers acquire this same lock before inserting, so a posting
+    // cannot slip between the financial snapshot and the closing journal.
+    await tx.execute(sql`
+      SELECT id FROM fiscal_years
+      WHERE id = ${params.fiscalYearId}
+        AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
+    const [fy] = await tx
+      .select()
+      .from(fiscalYears)
+      .where(
+        and(
+          eq(fiscalYears.id, params.fiscalYearId),
+          eq(fiscalYears.organizationId, params.organizationId)
+        )
+      )
+      .limit(1);
+    if (!fy) throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی یافت نشد.");
+    if (fy.status === "CLOSED") {
+      throw new ApiError(409, "FISCAL_YEAR_ALREADY_CLOSED", "این سال مالی قبلاً بسته شده است.");
+    }
+    if (!["OPEN", "REOPENED"].includes(fy.status)) {
+      throw new ApiError(409, "FISCAL_YEAR_NOT_OPEN", "سال مالی در وضعیت قابل بستن قرار ندارد.");
+    }
+
+    const checklist = await runPreClosingChecklist(params.organizationId, params.fiscalYearId);
+    if (checklist.critical_failures > 0) {
+      throw new ApiError(
+        409,
+        "PRE_CLOSING_CHECKLIST_FAILED",
+        "خطاهای بحرانی در چک‌لیست پیش از بستن سال مالی وجود دارد و بستن سال مسدود است."
+      );
+    }
+    if (checklist.warnings_count > 0 && !params.acknowledgeWarnings) {
+      throw new ApiError(
+        422,
+        "WARNINGS_ACKNOWLEDGMENT_REQUIRED",
+        `تعداد ${checklist.warnings_count} هشدار در چک‌لیست وجود دارد؛ برای ادامه باید acknowledge_warnings = true تایید شود.`
+      );
+    }
+
+    const preview = await buildFiscalYearClosingPreview(params.organizationId, params.fiscalYearId);
+    if (!preview.is_balanced) {
+      throw new ApiError(409, "CLOSING_JOURNAL_UNBALANCED", "سند اختتامیه محاسبه‌شده تراز نیست.");
+    }
+
     let closingJournal = null;
 
     if (preview.closing_lines.length >= 2) {
@@ -909,105 +983,137 @@ export async function prepareAndOpenNextFiscalYear(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const [prevFy] = await db
-    .select()
-    .from(fiscalYears)
-    .where(
-      and(
-        eq(fiscalYears.id, params.previousFiscalYearId),
+  const opened = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM fiscal_years
+      WHERE id = ${params.previousFiscalYearId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
+    const [prevFy] = await tx.select().from(fiscalYears).where(and(
+      eq(fiscalYears.id, params.previousFiscalYearId),
+      eq(fiscalYears.organizationId, params.organizationId)
+    )).limit(1);
+    if (!prevFy) throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی قبلی یافت نشد.");
+    if (prevFy.status !== "CLOSED") throw new ApiError(409, "PREVIOUS_FISCAL_YEAR_NOT_CLOSED", "برای انتقال مانده و افتتاح سال مالی جدید، ابتدا باید سال مالی قبلی را ببندید.");
+
+    const expectedNextStart = new Date(`${prevFy.endDate}T00:00:00.000Z`);
+    expectedNextStart.setUTCDate(expectedNextStart.getUTCDate() + 1);
+    const expectedNextStartDate = expectedNextStart.toISOString().slice(0, 10);
+    if (params.nextStartDate !== expectedNextStartDate || params.nextEndDate < params.nextStartDate) {
+      throw new ApiError(422, "NEXT_FISCAL_YEAR_DATES_INVALID", `سال مالی بعدی باید از ${expectedNextStartDate} آغاز شود و تاریخ پایان آن نیز از تاریخ آغاز جلوتر باشد.`);
+    }
+
+    const [closingRec] = await tx.select().from(fiscalYearClosings).where(and(
+      eq(fiscalYearClosings.organizationId, params.organizationId),
+      eq(fiscalYearClosings.fiscalYearId, prevFy.id),
+      eq(fiscalYearClosings.status, "POSTED")
+    )).orderBy(desc(fiscalYearClosings.createdAt)).limit(1);
+    if (!closingRec) throw new ApiError(422, "FISCAL_YEAR_CLOSING_RECORD_MISSING", "سابقهٔ قطعی بستن سال مالی برای انتقال مانده یافت نشد.");
+
+    const openingLines: JournalLineInput[] = closingRec.carryForwardSnapshot.map((row) => ({
+      accountId: String(row.account_id),
+      debit: String(row.debit),
+      credit: String(row.credit),
+      description: `انتقال مانده دائمی از ${prevFy.name} (${String(row.account_code)} — ${String(row.account_name)})`,
+    }));
+    if (openingLines.length === 1) throw new ApiError(409, "CARRY_FORWARD_UNBALANCED", "ماندهٔ انتقالی برای ساخت سند افتتاحیه تراز نیست.");
+    const openingDebit = openingLines.reduce((sum, line) => addDec(sum, line.debit), BigInt(0));
+    const openingCredit = openingLines.reduce((sum, line) => addDec(sum, line.credit), BigInt(0));
+    if (!eqDec(openingDebit, openingCredit)) throw new ApiError(409, "CARRY_FORWARD_UNBALANCED", "ماندهٔ انتقالی برای ساخت سند افتتاحیه تراز نیست.");
+
+    let nextFy: typeof fiscalYears.$inferSelect;
+    let periods: Array<typeof accountingPeriods.$inferSelect>;
+    let createdNextFiscalYear = false;
+    if (prevFy.nextFiscalYearId) {
+      await tx.execute(sql`
+        SELECT id FROM fiscal_years
+        WHERE id = ${prevFy.nextFiscalYearId} AND organization_id = ${params.organizationId}
+        FOR UPDATE
+      `);
+      const [existingNext] = await tx.select().from(fiscalYears).where(and(
+        eq(fiscalYears.id, prevFy.nextFiscalYearId),
         eq(fiscalYears.organizationId, params.organizationId)
-      )
-    )
-    .limit(1);
-  if (!prevFy) throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی قبلی یافت نشد.");
-  if (prevFy.status !== "CLOSED") {
-    throw new ApiError(
-      409,
-      "PREVIOUS_FISCAL_YEAR_NOT_CLOSED",
-      "برای انتقال مانده و افتتاح سال مالی جدید، ابتدا باید سال مالی قبلی را ببندید."
-    );
-  }
-  if (prevFy.nextFiscalYearId) {
-    throw new ApiError(409, "NEXT_FISCAL_YEAR_ALREADY_EXISTS", "سال مالی بعدی قبلاً از این سال مالی ایجاد شده است.");
-  }
+      )).limit(1);
+      if (!existingNext || existingNext.status !== "OPEN" || existingNext.openingJournalId) {
+        throw new ApiError(409, "NEXT_FISCAL_YEAR_ALREADY_OPENED", "سال مالی بعدی قبلاً افتتاح شده یا در وضعیت نامعتبر است.");
+      }
+      const existingEntries = await tx.select({ id: journalEntries.id }).from(journalEntries).where(and(
+        eq(journalEntries.organizationId, params.organizationId),
+        eq(journalEntries.fiscalYearId, existingNext.id),
+        inArray(journalEntries.status, ["POSTED", "DRAFT"])
+      )).limit(1);
+      if (existingEntries.length > 0) throw new ApiError(409, "NEXT_FISCAL_YEAR_HAS_ACTIVITY", "سال مالی بعدی دارای سند حسابداری است؛ مانده افتتاحیه را نمی‌توان بدون بازسازی دفترها تغییر داد.");
+      if (existingNext.startDate !== params.nextStartDate || existingNext.endDate !== params.nextEndDate) {
+        throw new ApiError(409, "NEXT_FISCAL_YEAR_DATES_MISMATCH", "تاریخ‌های سال مالی بعدی با سالی که قبلاً ایجاد شده یکسان نیست.");
+      }
+      nextFy = existingNext;
+      periods = await tx.select().from(accountingPeriods).where(eq(accountingPeriods.fiscalYearId, existingNext.id)).orderBy(accountingPeriods.periodNumber);
+      if (periods.length === 0) throw new ApiError(409, "NEXT_FISCAL_YEAR_PERIODS_MISSING", "دوره‌های سال مالی بعدی ایجاد نشده‌اند.");
+    } else {
+      const created = await createFiscalYearWithPeriodsTx(tx, {
+        organizationId: params.organizationId,
+        name: params.nextName,
+        startDate: params.nextStartDate,
+        endDate: params.nextEndDate,
+        calendarSystem: prevFy.calendarSystem as "PERSIAN" | "GREGORIAN",
+        currency: prevFy.currency,
+        previousFiscalYearId: prevFy.id,
+        status: "OPEN",
+        actorUserId: params.actorUserId,
+        actorEmail: params.actorEmail,
+        ipAddress: params.ipAddress,
+      });
+      nextFy = created.fiscalYear;
+      periods = created.periods;
+      createdNextFiscalYear = true;
+    }
 
-  const [closingRec] = await db
-    .select()
-    .from(fiscalYearClosings)
-    .where(
-      and(
-        eq(fiscalYearClosings.organizationId, params.organizationId),
-        eq(fiscalYearClosings.fiscalYearId, prevFy.id),
-        eq(fiscalYearClosings.status, "POSTED")
-      )
-    )
-    .orderBy(desc(fiscalYearClosings.createdAt))
-    .limit(1);
+    const jRes = openingLines.length >= 2
+      ? await createJournalEntryTx(tx, {
+          organizationId: params.organizationId,
+          actorUserId: params.actorUserId,
+          actorEmail: params.actorEmail,
+          fiscalYearId: nextFy.id,
+          accountingPeriodId: periods[0].id,
+          entryDate: nextFy.startDate,
+          description: `سند افتتاحیه ${nextFy.name} — انتقال مانده حساب‌های دائمی از سند اختتامیه ${prevFy.name}`,
+          referenceType: "OPENING",
+          referenceId: prevFy.closingJournalId ?? closingRec.id,
+          postImmediately: true,
+          allowInactiveAccounts: true,
+          lines: openingLines,
+        })
+      : null;
 
-  if (!closingRec || closingRec.carryForwardSnapshot.length === 0) {
-    throw new ApiError(422, "CARRY_FORWARD_SNAPSHOT_EMPTY", "مانده حساب‌های دائمی برای انتقال یافت نشد.");
-  }
-
-  // Create Next Fiscal Year + 4 open periods
-  const { fiscalYear: nextFy, periods } = await createFiscalYearWithPeriods({
-    organizationId: params.organizationId,
-    name: params.nextName,
-    startDate: params.nextStartDate,
-    endDate: params.nextEndDate,
-    calendarSystem: prevFy.calendarSystem as "PERSIAN" | "GREGORIAN",
-    currency: prevFy.currency,
-    previousFiscalYearId: prevFy.id,
-    status: "OPEN",
-    actorUserId: params.actorUserId,
-    actorEmail: params.actorEmail,
-    ipAddress: params.ipAddress,
+    for (const line of openingLines) {
+      await tx.insert(openingBalances).values({
+        organizationId: params.organizationId,
+        fiscalYearId: nextFy.id,
+        accountId: line.accountId,
+        debit: line.debit,
+        credit: line.credit,
+      }).onConflictDoUpdate({
+        target: [openingBalances.fiscalYearId, openingBalances.accountId],
+        set: { debit: line.debit, credit: line.credit },
+      });
+    }
+    const [updatedNext] = await tx.update(fiscalYears).set({ openingJournalId: jRes?.entry.id ?? null }).where(eq(fiscalYears.id, nextFy.id)).returning();
+    return { nextFiscalYear: updatedNext, periods, openingJournal: jRes?.entry ?? null, carriedAccounts: closingRec.carryForwardSnapshot, previousFiscalYear: prevFy, createdNextFiscalYear };
   });
 
-  // Post Next-Year Opening Journal strictly from Permanent Accounts ONLY (Assets, Liabilities, Equity)
-  const openingLines: JournalLineInput[] = closingRec.carryForwardSnapshot.map((row) => ({
-    accountId: String(row.account_id),
-    debit: String(row.debit),
-    credit: String(row.credit),
-    description: `انتقال مانده دائمی از ${prevFy.name} (${String(row.account_code)} — ${String(row.account_name)})`,
-  }));
-
-  const opened = await withTenantTransaction(params.organizationId, async (tx) => {
-    const jRes = await createJournalEntryTx(tx, {
+  if (opened.createdNextFiscalYear) {
+    await recordAuditLog({
       organizationId: params.organizationId,
       actorUserId: params.actorUserId,
       actorEmail: params.actorEmail,
-      fiscalYearId: nextFy.id,
-      accountingPeriodId: periods[0].id,
-      entryDate: nextFy.startDate,
-      description: `سند افتتاحیه ${nextFy.name} — انتقال مانده حساب‌های دائمی از سند اختتامیه ${prevFy.name}`,
-      referenceType: "OPENING",
-      referenceId: prevFy.closingJournalId ?? closingRec.id,
-      postImmediately: true,
-      allowInactiveAccounts: true,
-      lines: openingLines,
+      scope: "ORGANIZATION",
+      action: "FISCAL_YEAR_CREATED",
+      entityType: "FISCAL_YEAR",
+      entityId: opened.nextFiscalYear.id,
+      ipAddress: params.ipAddress,
+      metadata: { name: opened.nextFiscalYear.name, startDate: params.nextStartDate, endDate: params.nextEndDate, previousFiscalYearId: opened.previousFiscalYear.id },
     });
-
-    for (const l of openingLines) {
-      await tx
-        .insert(openingBalances)
-        .values({
-          organizationId: params.organizationId,
-          fiscalYearId: nextFy.id,
-          accountId: l.accountId,
-          debit: l.debit,
-          credit: l.credit,
-        })
-        .onConflictDoNothing();
-    }
-
-    const [updNextFy] = await tx
-      .update(fiscalYears)
-      .set({ openingJournalId: jRes.entry.id, status: "OPEN" })
-      .where(eq(fiscalYears.id, nextFy.id))
-      .returning();
-
-    return { nextFiscalYear: updNextFy, periods, openingJournal: jRes.entry, carriedAccounts: closingRec.carryForwardSnapshot };
-  });
+  }
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -1019,10 +1125,10 @@ export async function prepareAndOpenNextFiscalYear(params: {
     entityId: opened.nextFiscalYear.id,
     ipAddress: params.ipAddress,
     metadata: {
-      previousFiscalYearId: prevFy.id,
-      previousClosingJournalId: prevFy.closingJournalId,
-      openingJournalId: opened.openingJournal.id,
-      carriedCount: closingRec.carryForwardSnapshot.length,
+      previousFiscalYearId: opened.previousFiscalYear.id,
+      previousClosingJournalId: opened.previousFiscalYear.closingJournalId,
+      openingJournalId: opened.openingJournal?.id ?? null,
+      carriedCount: opened.carriedAccounts.length,
     },
   });
 
@@ -1045,87 +1151,84 @@ export async function reopenClosedFiscalYear(params: {
     throw new ApiError(422, "REOPEN_REASON_REQUIRED", "ذکر دلیل رسمی (حداقل ۵ کاراکتر) برای بازگشایی سال مالی الزامی است.");
   }
 
-  const [fy] = await db
-    .select()
-    .from(fiscalYears)
-    .where(and(eq(fiscalYears.id, params.fiscalYearId), eq(fiscalYears.organizationId, params.organizationId)))
-    .limit(1);
-  if (!fy) throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی یافت نشد.");
-  if (fy.status !== "CLOSED") {
-    throw new ApiError(409, "FISCAL_YEAR_NOT_CLOSED", "این سال مالی در وضعیت بسته قرار ندارد.");
-  }
+  const reopened = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM fiscal_years
+      WHERE id = ${params.fiscalYearId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
+    const [fy] = await tx.select().from(fiscalYears).where(and(
+      eq(fiscalYears.id, params.fiscalYearId),
+      eq(fiscalYears.organizationId, params.organizationId)
+    )).limit(1);
+    if (!fy) throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی یافت نشد.");
+    if (fy.status !== "CLOSED") throw new ApiError(409, "FISCAL_YEAR_NOT_CLOSED", "این سال مالی در وضعیت بسته قرار ندارد.");
 
-  // Dependency Safety Check: Does next fiscal year have posted operational (non-OPENING) transactions?
-  if (fy.nextFiscalYearId) {
-    const nextOps = await db
-      .select({ id: journalEntries.id })
-      .from(journalEntries)
-      .where(
-        and(
-          eq(journalEntries.organizationId, params.organizationId),
-          eq(journalEntries.fiscalYearId, fy.nextFiscalYearId),
-          ne(journalEntries.referenceType, "OPENING"),
-          inArray(journalEntries.status, ["POSTED"])
-        )
-      )
-      .limit(1);
-    if (nextOps.length > 0) {
-      throw new ApiError(
-        409,
-        "NEXT_FISCAL_YEAR_HAS_ACTIVITY",
-        "سال مالی بعدی دارای اسناد عملیاتی قطعی است؛ بازگشایی مستقیم مسدود است. لطفاً سند اصلاحی در سال جدید ثبت کنید."
-      );
+    if (fy.nextFiscalYearId) {
+      await tx.execute(sql`
+        SELECT id FROM fiscal_years
+        WHERE id = ${fy.nextFiscalYearId} AND organization_id = ${params.organizationId}
+        FOR UPDATE
+      `);
+      const [nextFy] = await tx.select().from(fiscalYears).where(and(
+        eq(fiscalYears.id, fy.nextFiscalYearId),
+        eq(fiscalYears.organizationId, params.organizationId)
+      )).limit(1);
+      if (nextFy?.openingJournalId) {
+        throw new ApiError(409, "NEXT_FISCAL_YEAR_OPENING_DEPENDS_ON_CLOSED_YEAR", "سال بعد سند افتتاحیهٔ قطعی دارد؛ بازگشایی این سال باعث کهنه شدن مانده‌های انتقالی می‌شود. ابتدا مانده‌های سال بعد را از مسیر اصلاح رسمی حسابداری بازسازی کنید.");
+      }
+      const nextOps = await tx.select({ id: journalEntries.id }).from(journalEntries).where(and(
+        eq(journalEntries.organizationId, params.organizationId),
+        eq(journalEntries.fiscalYearId, fy.nextFiscalYearId),
+        ne(journalEntries.referenceType, "OPENING"),
+        eq(journalEntries.status, "POSTED")
+      )).limit(1);
+      if (nextOps.length > 0) throw new ApiError(409, "NEXT_FISCAL_YEAR_HAS_ACTIVITY", "سال مالی بعدی دارای اسناد عملیاتی قطعی است؛ بازگشایی مستقیم مسدود است.");
     }
-  }
 
-  // Reopen last period temporarily so reversal entry can post cleanly inside the fiscal year!
-  const periods = await db
-    .select()
-    .from(accountingPeriods)
-    .where(eq(accountingPeriods.fiscalYearId, fy.id))
-    .orderBy(desc(accountingPeriods.periodNumber));
+    const periods = await tx.select().from(accountingPeriods).where(eq(accountingPeriods.fiscalYearId, fy.id)).orderBy(desc(accountingPeriods.periodNumber));
+    let closingPeriodId: string | null = periods[0]?.id ?? null;
+    if (fy.closingJournalId) {
+      const [closingJournal] = await tx.select({ accountingPeriodId: journalEntries.accountingPeriodId }).from(journalEntries).where(and(
+        eq(journalEntries.id, fy.closingJournalId),
+        eq(journalEntries.organizationId, params.organizationId)
+      )).limit(1);
+      if (closingJournal?.accountingPeriodId) closingPeriodId = closingJournal.accountingPeriodId;
+    }
+    if (!closingPeriodId && fy.closingJournalId) throw new ApiError(409, "CLOSING_PERIOD_MISSING", "دورهٔ سند اختتامیه برای بازگشایی یافت نشد.");
 
-  await db
-    .update(fiscalYears)
-    .set({ status: "REOPENED", reopenedAt: new Date(), reopenedBy: params.actorUserId, reopenReason: params.reason })
-    .where(eq(fiscalYears.id, fy.id));
+    const now = new Date();
+    const [reopenedFy] = await tx.update(fiscalYears).set({
+      status: "REOPENED",
+      reopenedAt: now,
+      reopenedBy: params.actorUserId,
+      reopenReason: params.reason,
+    }).where(and(
+      eq(fiscalYears.id, fy.id),
+      eq(fiscalYears.organizationId, params.organizationId),
+      eq(fiscalYears.status, "CLOSED")
+    )).returning();
+    if (!reopenedFy) throw new ApiError(409, "FISCAL_YEAR_CHANGED", "وضعیت سال مالی هم‌زمان تغییر کرد؛ دوباره تلاش کنید.");
+    if (closingPeriodId) {
+      await tx.update(accountingPeriods).set({ status: "OPEN", closedAt: null, closedBy: null }).where(eq(accountingPeriods.id, closingPeriodId));
+    }
 
-  if (periods[0]) {
-    await db
-      .update(accountingPeriods)
-      .set({ status: "OPEN", closedAt: null, closedBy: null })
-      .where(eq(accountingPeriods.id, periods[0].id));
-  }
-
-  // Reverse the closing journal via immutable reversal voucher (NEVER delete!)
-  let reversalResult = null;
-  if (fy.closingJournalId) {
-    reversalResult = await reverseJournalEntry({
-      organizationId: params.organizationId,
-      journalEntryId: fy.closingJournalId,
-      reason: `بازگشایی مجاز سال مالی ${fy.name}: ${params.reason}`,
-      actorUserId: params.actorUserId,
-      actorEmail: params.actorEmail,
-      ipAddress: params.ipAddress,
-    });
-  }
-
-  await db
-    .update(fiscalYearClosings)
-    .set({ status: "REVERSED" })
-    .where(
-      and(
-        eq(fiscalYearClosings.organizationId, params.organizationId),
-        eq(fiscalYearClosings.fiscalYearId, fy.id),
-        eq(fiscalYearClosings.status, "POSTED")
-      )
-    );
-
-  const [reopenedFy] = await db
-    .select()
-    .from(fiscalYears)
-    .where(eq(fiscalYears.id, fy.id))
-    .limit(1);
+    const reversalResult = fy.closingJournalId
+      ? await reverseJournalEntryTx(tx, {
+          organizationId: params.organizationId,
+          journalEntryId: fy.closingJournalId,
+          reason: `بازگشایی مجاز سال مالی ${fy.name}: ${params.reason}`,
+          actorUserId: params.actorUserId,
+          actorEmail: params.actorEmail,
+        })
+      : null;
+    await tx.update(fiscalYearClosings).set({ status: "REVERSED" }).where(and(
+      eq(fiscalYearClosings.organizationId, params.organizationId),
+      eq(fiscalYearClosings.fiscalYearId, fy.id),
+      eq(fiscalYearClosings.status, "POSTED")
+    ));
+    return { fiscalYear: reopenedFy, reversal: reversalResult?.reversal ?? null, originalFiscalYear: fy };
+  });
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -1134,19 +1237,19 @@ export async function reopenClosedFiscalYear(params: {
     scope: "SECURITY",
     action: "FISCAL_YEAR_REOPENED",
     entityType: "FISCAL_YEAR",
-    entityId: fy.id,
+    entityId: reopened.fiscalYear.id,
     ipAddress: params.ipAddress,
     severity: "WARN",
     metadata: {
       reason: params.reason,
-      reversedClosingJournalId: fy.closingJournalId,
-      reversalVoucherId: reversalResult?.reversal.id ?? null,
+      reversedClosingJournalId: reopened.originalFiscalYear.closingJournalId,
+      reversalVoucherId: reopened.reversal?.id ?? null,
     },
   });
 
   return {
-    fiscalYear: reopenedFy,
-    reversal: reversalResult?.reversal ?? null,
+    fiscalYear: reopened.fiscalYear,
+    reversal: reopened.reversal,
     historicalJournalPreserved: true,
   };
 }

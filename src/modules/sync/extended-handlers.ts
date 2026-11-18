@@ -289,6 +289,9 @@ export async function processExtendedSyncEntity(params: {
         const [upd] = await tx.update(financialAccounts).set({
           ...(p.name ? { name: String(p.name) } : {}),
           ...(p.bank_name !== undefined ? { bankName: p.bank_name ? String(p.bank_name) : null } : {}),
+          ...(p.account_number !== undefined ? { accountNumber: p.account_number ? String(p.account_number) : null } : {}),
+          ...(p.iban !== undefined ? { iban: p.iban ? String(p.iban) : null } : {}),
+          ...(p.is_active !== undefined ? { isActive: Boolean(p.is_active) } : {}),
           version: srv.version + 1, updatedAt: new Date(),
         }).where(eq(financialAccounts.id, srv.id)).returning();
         await appendSyncChangeLog(tx, { organizationId, entityType: "treasury_account", entityId: upd.id, operation: "UPSERT", version: upd.version, sourceDeviceId: deviceId, payload: { id: upd.id, name: upd.name, balance: upd.balance } });

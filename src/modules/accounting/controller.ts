@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import * as XLSX from "xlsx";
 import { db } from "@/db";
@@ -41,9 +41,10 @@ import {
   parseListQuery,
 } from "@/lib/errors";
 import { checkIdempotency, saveIdempotency } from "@/lib/idempotency";
-import { requireOrgContext } from "@/lib/tenant";
+import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
 import {
   buildAccountingReports,
+  createOrganizationAccount,
   createJournalEntry,
   postJournalEntry,
   reverseJournalEntry,
@@ -51,9 +52,12 @@ import {
 import { getLiveStockBalances } from "@/modules/inventory/service";
 
 const createAccountSchema = z.object({
-  group_id: z.string().uuid(),
+  group_id: z.string().uuid().optional(),
+  parent_id: z.string().uuid().nullable().optional(),
+  account_level: z.number().int().min(2).max(4).optional(),
   code: z.string().min(2),
   name: z.string().min(2),
+  description: z.string().optional(),
   account_type: z.enum(["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"]),
   normal_balance: z.enum(["DEBIT", "CREDIT"]),
   is_postable: z.boolean().default(true),
@@ -104,20 +108,23 @@ export async function handleAccountingRoutes(
       return ok({ groups, accounts: accs });
     }
     if (method === "POST" && !id) {
-      const ctx = await requireOrgContext(req, "accounting.journal.create", { requireActiveSubscription: true });
+      const ctx = await requireOrgContext(req, "accounting.coa.manage", { requireActiveSubscription: true });
       const body = createAccountSchema.parse(await req.json());
-      const [created] = await db
-        .insert(accounts)
-        .values({
-          organizationId: ctx.organizationId,
-          groupId: body.group_id,
-          code: body.code.trim(),
-          name: body.name.trim(),
-          accountType: body.account_type,
-          normalBalance: body.normal_balance,
-          isPostable: body.is_postable,
-        })
-        .returning();
+      const created = await createOrganizationAccount({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        actorEmail: ctx.email,
+        ipAddress: ctx.ipAddress,
+        groupId: body.group_id,
+        parentId: body.parent_id,
+        accountLevel: body.account_level,
+        code: body.code,
+        name: body.name,
+        description: body.description,
+        accountType: body.account_type,
+        normalBalance: body.normal_balance,
+        isPostable: body.is_postable,
+      });
       return ok(created, 201);
     }
     if (id) {
@@ -132,11 +139,31 @@ export async function handleAccountingRoutes(
       if (method === "PATCH") {
         await requireOrgContext(req, "accounting.journal.create", { requireActiveSubscription: true });
         const body = (await req.json()) as { name?: string; is_active?: boolean };
+        if (body.is_active !== undefined) {
+          throw new ApiError(
+            409,
+            "USE_CONTROLLED_ACCOUNT_LIFECYCLE",
+            body.is_active
+              ? "برای فعال‌سازی حساب از عملیات fiscal/accounts/{id}/activate همراه با دلیل استفاده کنید."
+              : "برای غیرفعال‌سازی حساب از عملیات کنترل‌شدهٔ fiscal/accounts/{id}/close استفاده کنید."
+          );
+        }
         const [upd] = await db
           .update(accounts)
-          .set({ ...(body.name ? { name: body.name } : {}), ...(body.is_active !== undefined ? { isActive: body.is_active } : {}) })
+          .set({ ...(body.name ? { name: body.name } : {}), version: acc.version + 1, updatedAt: new Date() })
           .where(eq(accounts.id, acc.id))
           .returning();
+        await recordAuditLog({
+          organizationId: ctx.organizationId,
+          actorUserId: ctx.userId,
+          actorEmail: ctx.email,
+          scope: "ORGANIZATION",
+          action: "ACCOUNT_UPDATED",
+          entityType: "ACCOUNT",
+          entityId: upd.id,
+          ipAddress: ctx.ipAddress,
+          metadata: { name: upd.name },
+        });
         return ok(upd);
       }
     }
@@ -421,32 +448,61 @@ export async function handleAccountingRoutes(
 
     const targetPeriod =
       fyPeriods.find((p) => p.name === body.period_title) ||
-      fyPeriods.find((p) => body.locked_until >= p.startDate && body.locked_until <= p.endDate) ||
-      fyPeriods[0];
+      fyPeriods.find((p) => body.locked_until >= p.startDate && body.locked_until <= p.endDate);
 
     if (!targetPeriod) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی منطبق یافت نشد.");
+    if (body.locked_until < targetPeriod.startDate || body.locked_until > targetPeriod.endDate) {
+      throw new ApiError(422, "LOCK_DATE_OUT_OF_RANGE", "تاریخ قفل باید در محدوده دورهٔ انتخاب‌شده باشد.");
+    }
 
-    const draftsInPeriod = await db
-      .select({ id: journalEntries.id })
-      .from(journalEntries)
-      .where(
-        and(
-          eq(journalEntries.organizationId, ctx.organizationId),
-          eq(journalEntries.accountingPeriodId, targetPeriod.id),
-          eq(journalEntries.status, "DRAFT")
+    const { period: locked, draftCount } = await withTenantTransaction(ctx.organizationId, async (tx) => {
+      await tx.execute(sql`
+        SELECT id FROM accounting_periods
+        WHERE id = ${targetPeriod.id}
+          AND organization_id = ${ctx.organizationId}
+          AND fiscal_year_id = ${fy.id}
+        FOR UPDATE
+      `);
+      const [current] = await tx
+        .select()
+        .from(accountingPeriods)
+        .where(
+          and(
+            eq(accountingPeriods.id, targetPeriod.id),
+            eq(accountingPeriods.organizationId, ctx.organizationId),
+            eq(accountingPeriods.fiscalYearId, fy.id)
+          )
         )
-      );
-
-    const [locked] = await db
-      .update(accountingPeriods)
-      .set({
-        status: "LOCKED",
-        lockedUntil: body.locked_until,
-        lockedBy: ctx.userId,
-        lockedAt: new Date(),
-      })
-      .where(eq(accountingPeriods.id, targetPeriod.id))
-      .returning();
+        .limit(1);
+      if (!current) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی یافت نشد.");
+      if (current.status === "CLOSED") {
+        throw new ApiError(409, "ACCOUNTING_PERIOD_CLOSED", "دوره بسته‌شده را نمی‌توان با عملیات قفل بازنویسی کرد.");
+      }
+      if (current.lockedUntil && body.locked_until < current.lockedUntil) {
+        throw new ApiError(409, "LOCK_CUTOFF_CANNOT_MOVE_BACK", "برای عقب‌بردن تاریخ قفل، ابتدا دوره را با دلیل رسمی بازگشایی کنید.");
+      }
+      const drafts = await tx
+        .select({ id: journalEntries.id })
+        .from(journalEntries)
+        .where(
+          and(
+            eq(journalEntries.organizationId, ctx.organizationId),
+            eq(journalEntries.accountingPeriodId, targetPeriod.id),
+            eq(journalEntries.status, "DRAFT")
+          )
+        );
+      const [period] = await tx
+        .update(accountingPeriods)
+        .set({
+          status: "LOCKED",
+          lockedUntil: body.locked_until,
+          lockedBy: ctx.userId,
+          lockedAt: new Date(),
+        })
+        .where(eq(accountingPeriods.id, targetPeriod.id))
+        .returning();
+      return { period, draftCount: drafts.length };
+    });
 
     await recordAuditLog({
       organizationId: ctx.organizationId,
@@ -461,15 +517,15 @@ export async function handleAccountingRoutes(
         fiscalYearId: fy.id,
         periodTitle: body.period_title,
         lockedUntil: body.locked_until,
-        draftsWarningCount: draftsInPeriod.length,
+        draftsWarningCount: draftCount,
       },
     });
 
     return ok({
       period: locked,
       warnings:
-        draftsInPeriod.length > 0
-          ? [`تعداد ${draftsInPeriod.length} سند پیش‌نویس در این دوره وجود دارد.`]
+        draftCount > 0
+          ? [`تعداد ${draftCount} سند پیش‌نویس در این دوره وجود دارد.`]
           : [],
     });
   }
@@ -480,16 +536,32 @@ export async function handleAccountingRoutes(
       .object({ reason: z.string().min(5, "ذکر دلیل رسمی (حداقل ۵ کاراکتر) برای بازگشایی دوره قفل‌شده الزامی است.") })
       .parse(await req.json());
 
-    const [upd] = await db
-      .update(accountingPeriods)
-      .set({
-        status: "OPEN",
-        lockedUntil: null,
-        unlockReason: body.reason,
-      })
-      .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
-      .returning();
-    if (!upd) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی یافت نشد.");
+    const upd = await withTenantTransaction(ctx.organizationId, async (tx) => {
+      await tx.execute(sql`
+        SELECT id FROM accounting_periods
+        WHERE id = ${id} AND organization_id = ${ctx.organizationId}
+        FOR UPDATE
+      `);
+      const [current] = await tx
+        .select()
+        .from(accountingPeriods)
+        .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
+        .limit(1);
+      if (!current) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی یافت نشد.");
+      if (current.status !== "LOCKED") {
+        throw new ApiError(409, "ACCOUNTING_PERIOD_NOT_LOCKED", "فقط دورهٔ قفل‌شده با این عملیات باز می‌شود؛ دورهٔ بسته از چرخهٔ بازگشایی سال مالی پیروی می‌کند.");
+      }
+      const [opened] = await tx
+        .update(accountingPeriods)
+        .set({
+          status: "OPEN",
+          lockedUntil: null,
+          unlockReason: body.reason,
+        })
+        .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
+        .returning();
+      return opened;
+    });
 
     await recordAuditLog({
       organizationId: ctx.organizationId,
@@ -508,18 +580,64 @@ export async function handleAccountingRoutes(
 
   if (sub === "periods" && id && method === "PATCH") {
     const ctx = await requireOrgContext(req, "accounting.period.manage", { requireActiveSubscription: true });
-    const body = z.object({ status: z.enum(["OPEN", "LOCKED", "CLOSED"]) }).parse(await req.json());
-    const [upd] = await db
-      .update(accountingPeriods)
-      .set({
-        status: body.status,
-        closedAt: body.status === "CLOSED" ? new Date() : null,
-        closedBy: body.status === "CLOSED" ? ctx.userId : null,
-        ...(body.status === "OPEN" ? { lockedUntil: null } : {}),
+    const body = z
+      .object({
+        status: z.enum(["OPEN", "LOCKED", "CLOSED"]),
+        reason: z.string().min(5).optional(),
       })
-      .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
-      .returning();
-    if (!upd) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی یافت نشد.");
+      .parse(await req.json());
+    if (body.status !== "CLOSED") {
+      throw new ApiError(409, "USE_CONTROLLED_PERIOD_ACTION", "برای قفل یا بازگشایی دوره از عملیات اختصاصی همراه با تاریخ یا دلیل استفاده کنید.");
+    }
+    if (!body.reason) {
+      throw new ApiError(422, "PERIOD_CLOSE_REASON_REQUIRED", "برای بستن دستی دوره، ثبت دلیل الزامی است.");
+    }
+    const { period: upd, draftCount } = await withTenantTransaction(ctx.organizationId, async (tx) => {
+      await tx.execute(sql`
+        SELECT id FROM accounting_periods
+        WHERE id = ${id} AND organization_id = ${ctx.organizationId}
+        FOR UPDATE
+      `);
+      const [current] = await tx
+        .select()
+        .from(accountingPeriods)
+        .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
+        .limit(1);
+      if (!current) throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی یافت نشد.");
+      if (current.status === "CLOSED") {
+        throw new ApiError(409, "ACCOUNTING_PERIOD_CLOSED", "این دوره قبلاً بسته شده است.");
+      }
+      const drafts = await tx
+        .select({ id: journalEntries.id })
+        .from(journalEntries)
+        .where(
+          and(
+            eq(journalEntries.organizationId, ctx.organizationId),
+            eq(journalEntries.accountingPeriodId, id),
+            eq(journalEntries.status, "DRAFT")
+          )
+        );
+      if (drafts.length > 0) {
+        throw new ApiError(409, "PERIOD_HAS_DRAFT_JOURNALS", `ابتدا ${drafts.length} سند پیش‌نویس این دوره را تعیین تکلیف کنید.`);
+      }
+      const [period] = await tx
+        .update(accountingPeriods)
+        .set({ status: "CLOSED", closedAt: new Date(), closedBy: ctx.userId })
+        .where(and(eq(accountingPeriods.id, id), eq(accountingPeriods.organizationId, ctx.organizationId)))
+        .returning();
+      return { period, draftCount: drafts.length };
+    });
+    await recordAuditLog({
+      organizationId: ctx.organizationId,
+      actorUserId: ctx.userId,
+      actorEmail: ctx.email,
+      scope: "ORGANIZATION",
+      action: "ACCOUNTING_PERIOD_CLOSED",
+      entityType: "ACCOUNTING_PERIOD",
+      entityId: upd.id,
+      ipAddress: ctx.ipAddress,
+      metadata: { reason: body.reason, draftCount },
+    });
     return ok(upd);
   }
 
@@ -684,14 +802,29 @@ export async function handleAccountingRoutes(
       if (method === "POST" && action === "reverse") {
         await requireOrgContext(req, "accounting.journal_entries.reverse", { requireActiveSubscription: true });
         const body = z
-          .object({ reason: z.string().min(2, "ذکر دلیل برگشت سند حسابداری الزامی است.").optional() })
+          .object({
+            reason: z.string().min(2, "ذکر دلیل برگشت سند حسابداری الزامی است.").optional(),
+            reversal_date: z.string().optional(),
+            reversal_date_jalali: z.string().optional(),
+            accounting_period_id: z.string().uuid().optional(),
+          })
           .parse(await req.json().catch(() => ({})));
+        const reversalDate =
+          body.reversal_date || body.reversal_date_jalali
+            ? resolveCanonicalDate(body.reversal_date, body.reversal_date_jalali)
+            : undefined;
+        const reversalPayload = {
+          id: entry.id,
+          reason: body.reason ?? "",
+          reversalDate: reversalDate ?? null,
+          accountingPeriodId: body.accounting_period_id ?? null,
+        };
         const idemKey = req.headers.get("idempotency-key");
         const cached = await checkIdempotency({
           organizationId: ctx.organizationId,
           key: idemKey,
           endpoint: `/api/v1/accounting/journal-entries/${entry.id}/reverse`,
-          payload: { id: entry.id, reason: body.reason ?? "" },
+          payload: reversalPayload,
         });
         if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
 
@@ -699,6 +832,8 @@ export async function handleAccountingRoutes(
           organizationId: ctx.organizationId,
           journalEntryId: entry.id,
           reason: body.reason ?? "سند معکوس اصلاحی",
+          reversalDate,
+          accountingPeriodId: body.accounting_period_id,
           actorUserId: ctx.userId,
           actorEmail: ctx.email,
           ipAddress: ctx.ipAddress,
@@ -707,7 +842,7 @@ export async function handleAccountingRoutes(
           organizationId: ctx.organizationId,
           key: idemKey,
           endpoint: `/api/v1/accounting/journal-entries/${entry.id}/reverse`,
-          payload: { id: entry.id, reason: body.reason ?? "" },
+          payload: reversalPayload,
           statusCode: 201,
           responseBody: res as unknown as Record<string, unknown>,
         });

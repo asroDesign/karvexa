@@ -1,8 +1,11 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  accountGroups,
   accountingPeriods,
   accounts,
+  contacts,
+  costCenters,
   fiscalYears,
   journalEntries,
   journalEntryLines,
@@ -44,6 +47,175 @@ export interface CreateJournalEntryInput {
   allowClosedPeriod?: boolean;
   allowInactiveAccounts?: boolean;
   lines: JournalLineInput[];
+}
+
+function assertCanonicalDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ApiError(422, "INVALID_ENTRY_DATE", "تاریخ سند باید به قالب میلادی YYYY-MM-DD باشد.");
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new ApiError(422, "INVALID_ENTRY_DATE", "تاریخ سند معتبر نیست.");
+  }
+}
+
+async function lockAccountingPeriod(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  organizationId: string,
+  fiscalYearId: string,
+  accountingPeriodId: string
+) {
+  await tx.execute(sql`
+    SELECT id FROM accounting_periods
+    WHERE id = ${accountingPeriodId}
+      AND organization_id = ${organizationId}
+      AND fiscal_year_id = ${fiscalYearId}
+    FOR UPDATE
+  `);
+  const [period] = await tx
+    .select()
+    .from(accountingPeriods)
+    .where(
+      and(
+        eq(accountingPeriods.id, accountingPeriodId),
+        eq(accountingPeriods.organizationId, organizationId),
+        eq(accountingPeriods.fiscalYearId, fiscalYearId)
+      )
+    )
+    .limit(1);
+  return period;
+}
+
+async function lockOrganizationAccounts(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  organizationId: string,
+  accountIds: string[]
+) {
+  for (const accountId of [...new Set(accountIds)].sort()) {
+    await tx.execute(sql`
+      SELECT id FROM accounts
+      WHERE id = ${accountId} AND organization_id = ${organizationId}
+      FOR UPDATE
+    `);
+  }
+}
+
+async function assertPostingPeriodOpen(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  params: {
+    organizationId: string;
+    fiscalYearId: string;
+    accountingPeriodId: string;
+    entryDate: string;
+    allowClosedPeriod?: boolean;
+  }
+) {
+  const period = await lockAccountingPeriod(
+    tx,
+    params.organizationId,
+    params.fiscalYearId,
+    params.accountingPeriodId
+  );
+  if (!period) {
+    throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی معتبر یافت نشد.");
+  }
+  if (params.entryDate < period.startDate || params.entryDate > period.endDate) {
+    throw new ApiError(
+      422,
+      "ENTRY_DATE_OUTSIDE_PERIOD",
+      `تاریخ سند باید در محدوده دوره «${period.name}» (${period.startDate} تا ${period.endDate}) باشد.`
+    );
+  }
+  if (params.allowClosedPeriod) return period;
+
+  if (period.status === "CLOSED") {
+    throw new ApiError(409, "ACCOUNTING_PERIOD_CLOSED", `دوره مالی «${period.name}» بسته شده است.`);
+  }
+  if (period.status === "LOCKED" && !period.lockedUntil) {
+    throw new ApiError(409, "ACCOUNTING_PERIOD_LOCKED", `دوره مالی «${period.name}» قفل شده است.`);
+  }
+
+  // A lock date is a cutoff for the organization, matching the Android guard.
+  // This prevents posting old dated entries through a different still-open period.
+  const [cutoff] = await tx
+    .select({ lockedUntil: sql<string | null>`MAX(${accountingPeriods.lockedUntil})` })
+    .from(accountingPeriods)
+    .where(
+      and(
+        eq(accountingPeriods.organizationId, params.organizationId),
+        sql`${accountingPeriods.lockedUntil} IS NOT NULL`
+      )
+    );
+  if (cutoff?.lockedUntil && params.entryDate <= cutoff.lockedUntil) {
+    throw new ApiError(
+      409,
+      "ACCOUNTING_PERIOD_LOCKED",
+      `ثبت سند تا تاریخ ${cutoff.lockedUntil} قفل شده است.`
+    );
+  }
+  return period;
+}
+
+/** Shared guard for inventory movements that do not create a journal themselves. */
+export async function assertAccountingDateWritableTx(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  organizationId: string,
+  entryDate: string
+) {
+  assertCanonicalDate(entryDate);
+  const [candidate] = await tx
+    .select()
+    .from(fiscalYears)
+    .where(
+      and(
+        eq(fiscalYears.organizationId, organizationId),
+        lte(fiscalYears.startDate, entryDate),
+        gte(fiscalYears.endDate, entryDate)
+      )
+    )
+    .orderBy(desc(fiscalYears.startDate))
+    .limit(1);
+  if (!candidate) {
+    throw new ApiError(409, "FISCAL_YEAR_NOT_FOUND_FOR_DATE", `برای تاریخ ${entryDate} سال مالی تعریف نشده است.`);
+  }
+
+  await tx.execute(sql`
+    SELECT id FROM fiscal_years
+    WHERE id = ${candidate.id} AND organization_id = ${organizationId}
+    FOR UPDATE
+  `);
+  const [fy] = await tx
+    .select()
+    .from(fiscalYears)
+    .where(and(eq(fiscalYears.id, candidate.id), eq(fiscalYears.organizationId, organizationId)))
+    .limit(1);
+  if (!fy || !["OPEN", "REOPENED"].includes(fy.status)) {
+    throw new ApiError(409, "FISCAL_YEAR_NOT_OPEN", "سال مالی این تاریخ بسته یا در وضعیت ثبت‌ناپذیر است.");
+  }
+
+  const periods = await tx
+    .select()
+    .from(accountingPeriods)
+    .where(
+      and(
+        eq(accountingPeriods.organizationId, organizationId),
+        eq(accountingPeriods.fiscalYearId, fy.id),
+        lte(accountingPeriods.startDate, entryDate),
+        gte(accountingPeriods.endDate, entryDate)
+      )
+    )
+    .orderBy(accountingPeriods.periodNumber);
+  const period = periods[0];
+  if (!period) {
+    throw new ApiError(409, "ACCOUNTING_PERIOD_NOT_FOUND_FOR_DATE", `برای تاریخ ${entryDate} دورهٔ حسابداری تعریف نشده است.`);
+  }
+  await assertPostingPeriodOpen(tx, {
+    organizationId,
+    fiscalYearId: fy.id,
+    accountingPeriodId: period.id,
+    entryDate,
+  });
+  return { fiscalYear: fy, period };
 }
 
 export function validateJournalLines(lines: JournalLineInput[]) {
@@ -96,6 +268,120 @@ export function validateJournalLines(lines: JournalLineInput[]) {
   };
 }
 
+export async function createOrganizationAccount(params: {
+  organizationId: string;
+  actorUserId: string;
+  actorEmail: string;
+  ipAddress?: string | null;
+  groupId?: string;
+  parentId?: string | null;
+  accountLevel?: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  accountType: string;
+  normalBalance: string;
+  isPostable: boolean;
+}) {
+  const created = await withTenantTransaction(params.organizationId, async (tx) => {
+    let groupId = params.groupId;
+    let accountLevel = params.accountLevel;
+    if (params.parentId) {
+      const [parent] = await tx
+        .select()
+        .from(accounts)
+        .where(
+          and(
+            eq(accounts.id, params.parentId),
+            eq(accounts.organizationId, params.organizationId)
+          )
+        )
+        .limit(1);
+      if (!parent) throw new ApiError(404, "PARENT_ACCOUNT_NOT_FOUND", "حساب والد متعلق به این سازمان یافت نشد.");
+      if (!parent.isActive || parent.accountStatus !== "ACTIVE") {
+        throw new ApiError(409, "PARENT_ACCOUNT_INACTIVE", "زیرحساب را نمی‌توان زیر حساب غیرفعال یا بسته ایجاد کرد.");
+      }
+      if (parent.isPostable || parent.accountLevel >= 4) {
+        throw new ApiError(409, "PARENT_ACCOUNT_NOT_GROUP", "حساب انتخاب‌شده اجازهٔ داشتن زیرحساب ندارد.");
+      }
+      if (params.accountType !== parent.accountType || params.normalBalance !== parent.normalBalance) {
+        throw new ApiError(422, "ACCOUNT_PARENT_TYPE_MISMATCH", "نوع و ماهیت حساب باید با حساب والد یکسان باشد.");
+      }
+      if (groupId && groupId !== parent.groupId) {
+        throw new ApiError(422, "ACCOUNT_GROUP_PARENT_MISMATCH", "گروه حساب باید با گروه حساب والد یکسان باشد.");
+      }
+      groupId = parent.groupId;
+      const expectedLevel = parent.accountLevel + 1;
+      if (accountLevel !== undefined && accountLevel !== expectedLevel) {
+        throw new ApiError(422, "ACCOUNT_LEVEL_PARENT_MISMATCH", `سطح حساب باید ${expectedLevel} باشد.`);
+      }
+      accountLevel = expectedLevel;
+      if (!params.code.trim().startsWith(parent.code) || params.code.trim().length <= parent.code.length) {
+        throw new ApiError(422, "ACCOUNT_CODE_PARENT_MISMATCH", "کد زیرحساب باید با کد حساب والد آغاز شود و ادامه داشته باشد.");
+      }
+    } else {
+      accountLevel ??= 2;
+      if (accountLevel !== 2) {
+        throw new ApiError(422, "ACCOUNT_PARENT_REQUIRED", "برای ساخت حساب سطح ۳ یا ۴، انتخاب حساب والد الزامی است.");
+      }
+      if (!groupId) throw new ApiError(422, "ACCOUNT_GROUP_REQUIRED", "گروه حساب برای حساب سطح کل الزامی است.");
+    }
+
+    const [group] = await tx
+      .select()
+      .from(accountGroups)
+      .where(
+        and(
+          eq(accountGroups.id, groupId!),
+          eq(accountGroups.organizationId, params.organizationId)
+        )
+      )
+      .limit(1);
+    if (!group) throw new ApiError(404, "ACCOUNT_GROUP_NOT_FOUND", "گروه حساب متعلق به این سازمان یافت نشد.");
+    if (group.nature !== params.accountType) {
+      throw new ApiError(422, "ACCOUNT_GROUP_TYPE_MISMATCH", "نوع حساب با ماهیت گروه حساب انتخاب‌شده سازگار نیست.");
+    }
+
+    const [account] = await tx
+      .insert(accounts)
+      .values({
+        organizationId: params.organizationId,
+        groupId: group.id,
+        parentId: params.parentId ?? null,
+        accountLevel,
+        code: params.code.trim(),
+        name: params.name.trim(),
+        description: params.description ?? null,
+        accountType: params.accountType,
+        normalBalance: params.normalBalance,
+        isPostable: params.isPostable,
+        accountStatus: "ACTIVE",
+        isActive: true,
+      })
+      .returning();
+    return account;
+  });
+
+  await recordAuditLog({
+    organizationId: params.organizationId,
+    actorUserId: params.actorUserId,
+    actorEmail: params.actorEmail,
+    scope: "ORGANIZATION",
+    action: "ACCOUNT_CREATED",
+    entityType: "ACCOUNT",
+    entityId: created.id,
+    ipAddress: params.ipAddress,
+    metadata: {
+      code: created.code,
+      accountLevel: created.accountLevel,
+      parentId: created.parentId,
+      groupId: created.groupId,
+      isPostable: created.isPostable,
+    },
+  });
+  return created;
+}
+
 export async function createJournalEntryTx(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   input: CreateJournalEntryInput
@@ -138,8 +424,40 @@ export async function createJournalEntryTx(
   if (!fy) {
     throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی فعال برای سازمان یافت نشد.");
   }
-  if (fy.status === "CLOSED" && !input.allowClosedPeriod) {
-    throw new ApiError(409, "FISCAL_YEAR_CLOSED", "سال مالی بسته شده است و امکان ثبت سند جدید وجود ندارد.");
+
+  // Serialize journal creation with fiscal close/reopen and re-read the year after waiting.
+  await tx.execute(sql`
+    SELECT id FROM fiscal_years
+    WHERE id = ${fy.id} AND organization_id = ${input.organizationId}
+    FOR UPDATE
+  `);
+  [fy] = await tx
+    .select()
+    .from(fiscalYears)
+    .where(
+      and(
+        eq(fiscalYears.id, fy.id),
+        eq(fiscalYears.organizationId, input.organizationId)
+      )
+    )
+    .limit(1);
+  if (!fy) {
+    throw new ApiError(404, "FISCAL_YEAR_NOT_FOUND", "سال مالی برای سازمان یافت نشد.");
+  }
+  assertCanonicalDate(input.entryDate);
+  if (input.entryDate < fy.startDate || input.entryDate > fy.endDate) {
+    throw new ApiError(
+      422,
+      "ENTRY_DATE_OUTSIDE_FISCAL_YEAR",
+      `تاریخ سند باید در محدوده سال مالی «${fy.name}» (${fy.startDate} تا ${fy.endDate}) باشد.`
+    );
+  }
+  if (!input.allowClosedPeriod && !["OPEN", "REOPENED"].includes(fy.status)) {
+    throw new ApiError(
+      409,
+      "FISCAL_YEAR_NOT_OPEN",
+      `سال مالی «${fy.name}» در وضعیت ${fy.status} است و امکان ثبت سند ندارد.`
+    );
   }
 
   // Resolve Accounting Period
@@ -167,35 +485,24 @@ export async function createJournalEntryTx(
         )
       )
       .orderBy(accountingPeriods.periodNumber);
-    period =
-      periods.find(
-        (p) => input.entryDate >= p.startDate && input.entryDate <= p.endDate
-      ) || periods.find((p) => p.status === "OPEN") || periods[0];
+    period = periods.find(
+      (p) => input.entryDate >= p.startDate && input.entryDate <= p.endDate
+    );
   }
 
   if (!period) {
     throw new ApiError(404, "ACCOUNTING_PERIOD_NOT_FOUND", "دوره مالی معتبر یافت نشد.");
   }
-  if (period.status === "CLOSED" && !input.allowClosedPeriod) {
-    throw new ApiError(
-      409,
-      "ACCOUNTING_PERIOD_CLOSED",
-      `دوره مالی «${period.name}» بسته شده است و پذیرش سند جدید مسدود است.`
-    );
-  }
-  if (
-    !input.allowClosedPeriod &&
-    (period.status === "LOCKED" || (period.lockedUntil && input.entryDate <= period.lockedUntil))
-  ) {
-    throw new ApiError(
-      409,
-      "ACCOUNTING_PERIOD_LOCKED",
-      `دوره مالی «${period.name}» تا تاریخ ${period.lockedUntil ?? period.endDate} قفل شده است و ثبت یا تغییر سند در این بازه مجاز نیست.`
-    );
-  }
-
+  await assertPostingPeriodOpen(tx, {
+    organizationId: input.organizationId,
+    fiscalYearId: fy.id,
+    accountingPeriodId: period.id,
+    entryDate: input.entryDate,
+    allowClosedPeriod: input.allowClosedPeriod,
+  });
   // Verify every account belongs strictly to this organization and is postable
   const uniqueAccIds = [...new Set(input.lines.map((l) => l.accountId))];
+  await lockOrganizationAccounts(tx, input.organizationId, uniqueAccIds);
   const validAccounts = await tx
     .select()
     .from(accounts)
@@ -223,7 +530,11 @@ export async function createJournalEntryTx(
   }
   if (!input.allowInactiveAccounts) {
     const closedAcc = validAccounts.find(
-      (a) => !a.isActive || a.accountStatus === "CLOSED" || a.accountStatus === "TEMPORARILY_SUSPENDED"
+      (a) =>
+        !a.isActive ||
+        a.accountStatus === "CLOSED" ||
+        a.accountStatus === "PENDING_CLOSURE" ||
+        a.accountStatus === "TEMPORARILY_SUSPENDED"
     );
     if (closedAcc) {
       throw new ApiError(
@@ -234,10 +545,39 @@ export async function createJournalEntryTx(
     }
   }
 
-  // Lock fiscal year row for race-free sequential entry_number
-  await tx.execute(
-    sql`SELECT id FROM fiscal_years WHERE id = ${fy.id} FOR UPDATE`
-  );
+  const uniqueCostCenterIds = [...new Set(input.lines.map((line) => line.costCenterId).filter((id): id is string => Boolean(id)))];
+  if (uniqueCostCenterIds.length > 0) {
+    const validCostCenters = await tx
+      .select({ id: costCenters.id })
+      .from(costCenters)
+      .where(
+        and(
+          eq(costCenters.organizationId, input.organizationId),
+          inArray(costCenters.id, uniqueCostCenterIds)
+        )
+      );
+    if (validCostCenters.length !== uniqueCostCenterIds.length) {
+      throw new ApiError(403, "COST_CENTER_NOT_FOUND", "یکی یا چند مرکز هزینه متعلق به این سازمان نیستند.");
+    }
+  }
+
+  const uniqueContactIds = [...new Set(input.lines.map((line) => line.contactId).filter((id): id is string => Boolean(id)))];
+  if (uniqueContactIds.length > 0) {
+    const validContacts = await tx
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.organizationId, input.organizationId),
+          inArray(contacts.id, uniqueContactIds)
+        )
+      );
+    if (validContacts.length !== uniqueContactIds.length) {
+      throw new ApiError(403, "CONTACT_NOT_FOUND", "یکی یا چند شخص/طرف حساب متعلق به این سازمان نیستند.");
+    }
+  }
+
+  // The fiscal year row is already locked above; use it to allocate a race-free sequence.
   const [maxRes] = await tx
     .select({
       maxNum: sql<number>`COALESCE(MAX(${journalEntries.entryNumber}), 0)`,
@@ -328,6 +668,12 @@ export async function postJournalEntry(params: {
   ipAddress?: string | null;
 }) {
   const updated = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM journal_entries
+      WHERE id = ${params.journalEntryId}
+        AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [entry] = await tx
       .select()
       .from(journalEntries)
@@ -350,23 +696,77 @@ export async function postJournalEntry(params: {
       );
     }
 
-    const [period] = await tx
+    await tx.execute(sql`
+      SELECT id FROM fiscal_years
+      WHERE id = ${entry.fiscalYearId}
+        AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
+    const [fy] = await tx
       .select()
-      .from(accountingPeriods)
-      .where(eq(accountingPeriods.id, entry.accountingPeriodId))
+      .from(fiscalYears)
+      .where(
+        and(
+          eq(fiscalYears.id, entry.fiscalYearId),
+          eq(fiscalYears.organizationId, params.organizationId)
+        )
+      )
       .limit(1);
-    if (!period || period.status === "CLOSED") {
+    if (!fy || !["OPEN", "REOPENED"].includes(fy.status)) {
       throw new ApiError(
         409,
-        "ACCOUNTING_PERIOD_CLOSED",
-        "دوره مالی مربوط به این سند بسته شده است."
+        "FISCAL_YEAR_NOT_OPEN",
+        "سال مالی مربوط به این سند باز نیست و امکان قطعی‌کردن آن وجود ندارد."
       );
     }
+    assertCanonicalDate(entry.entryDate);
+    if (entry.entryDate < fy.startDate || entry.entryDate > fy.endDate) {
+      throw new ApiError(409, "ENTRY_DATE_OUTSIDE_FISCAL_YEAR", "تاریخ سند خارج از محدوده سال مالی آن است.");
+    }
+    await assertPostingPeriodOpen(tx, {
+      organizationId: params.organizationId,
+      fiscalYearId: fy.id,
+      accountingPeriodId: entry.accountingPeriodId,
+      entryDate: entry.entryDate,
+    });
 
     const lines = await tx
       .select()
       .from(journalEntryLines)
-      .where(eq(journalEntryLines.journalEntryId, entry.id));
+      .where(
+        and(
+          eq(journalEntryLines.journalEntryId, entry.id),
+          eq(journalEntryLines.organizationId, params.organizationId)
+        )
+      );
+
+    const lineAccountIds = [...new Set(lines.map((line) => line.accountId))];
+    await lockOrganizationAccounts(tx, params.organizationId, lineAccountIds);
+    const postingAccounts = await tx
+      .select()
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.organizationId, params.organizationId),
+          inArray(accounts.id, lineAccountIds)
+        )
+      );
+    if (postingAccounts.length !== lineAccountIds.length) {
+      throw new ApiError(403, "ACCOUNT_NOT_FOUND", "حساب یکی از سطرهای سند دیگر متعلق به این سازمان نیست.");
+    }
+    const invalidAccount = postingAccounts.find(
+      (account) =>
+        !account.isPostable ||
+        !account.isActive ||
+        ["CLOSED", "PENDING_CLOSURE", "TEMPORARILY_SUSPENDED"].includes(account.accountStatus)
+    );
+    if (invalidAccount) {
+      throw new ApiError(
+        409,
+        "ACCOUNT_NOT_POSTABLE",
+        `حساب «${invalidAccount.name}» (${invalidAccount.code}) دیگر برای ثبت سند فعال و قابل آرتیکل‌گذاری نیست.`
+      );
+    }
 
     const { totalDebit, totalCredit, isBalanced } = validateJournalLines(
       lines.map((l) => ({
@@ -396,8 +796,17 @@ export async function postJournalEntry(params: {
         syncSeq: Date.now(),
         updatedAt: new Date(),
       })
-      .where(eq(journalEntries.id, entry.id))
+      .where(
+        and(
+          eq(journalEntries.id, entry.id),
+          eq(journalEntries.status, "DRAFT"),
+          eq(journalEntries.version, entry.version)
+        )
+      )
       .returning();
+    if (!posted) {
+      throw new ApiError(409, "ACCOUNTING_ENTRY_CHANGED", "سند هم‌زمان توسط کاربر دیگری تغییر کرده است؛ دوباره بارگذاری کنید.");
+    }
 
     return posted;
   });
@@ -420,84 +829,111 @@ export async function postJournalEntry(params: {
 /**
  * Posted vouchers are strictly immutable. Corrections occur ONLY by issuing a linked Reversal Entry.
  */
+export async function reverseJournalEntryTx(
+  tx: Parameters<Parameters<typeof withTenantTransaction>[1]>[0],
+  params: {
+  organizationId: string;
+  journalEntryId: string;
+  reason?: string;
+  reversalDate?: string;
+  accountingPeriodId?: string;
+  actorUserId: string;
+  actorEmail: string;
+  }
+) {
+  await tx.execute(sql`
+    SELECT id FROM journal_entries
+    WHERE id = ${params.journalEntryId}
+      AND organization_id = ${params.organizationId}
+    FOR UPDATE
+  `);
+  const [original] = await tx
+    .select()
+    .from(journalEntries)
+    .where(
+      and(
+        eq(journalEntries.id, params.journalEntryId),
+        eq(journalEntries.organizationId, params.organizationId)
+      )
+    )
+    .limit(1);
+
+  if (!original) {
+    throw new ApiError(404, "JOURNAL_NOT_FOUND", "سند حسابداری یافت نشد.");
+  }
+  if (original.status !== "POSTED") {
+    throw new ApiError(
+      409,
+      "ONLY_POSTED_REVERSIBLE",
+      "فقط اسناد قطعی (POSTED) قابل صدور سند معکوس هستند."
+    );
+  }
+
+  const origLines = await tx
+    .select()
+    .from(journalEntryLines)
+    .where(eq(journalEntryLines.journalEntryId, original.id));
+
+  const reversedLines: JournalLineInput[] = origLines.map((l) => ({
+    accountId: l.accountId,
+    costCenterId: l.costCenterId,
+    contactId: l.contactId,
+    debit: l.credit,
+    credit: l.debit,
+    description: `معکوس سند #${original.entryNumber}: ${l.description ?? ""}`,
+  }));
+
+  const reversal = await createJournalEntryTx(tx, {
+    organizationId: params.organizationId,
+    actorUserId: params.actorUserId,
+    actorEmail: params.actorEmail,
+    fiscalYearId: original.fiscalYearId,
+    accountingPeriodId: params.accountingPeriodId ?? original.accountingPeriodId,
+    entryDate: params.reversalDate ?? original.entryDate,
+    description: `سند معکوس بابت اصلاح سند شماره ${original.entryNumber}${params.reason ? ` — ${params.reason}` : ""}`,
+    referenceType: "REVERSAL",
+    referenceId: original.id,
+    postImmediately: true,
+    allowInactiveAccounts: true,
+    lines: reversedLines,
+  });
+
+  const [markedOrig] = await tx
+    .update(journalEntries)
+    .set({
+      reversedEntryId: reversal.entry.id,
+      status: "REVERSED",
+      version: original.version + 1,
+      syncSeq: Date.now(),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(journalEntries.id, original.id),
+        eq(journalEntries.organizationId, params.organizationId),
+        eq(journalEntries.status, "POSTED"),
+        eq(journalEntries.version, original.version)
+      )
+    )
+    .returning();
+  if (!markedOrig) {
+    throw new ApiError(409, "ACCOUNTING_ENTRY_CHANGED", "سند هم‌زمان تغییر کرده است و برگشت انجام نشد.");
+  }
+
+  return { original: markedOrig, reversal: reversal.entry, lines: reversal.lines };
+}
+
 export async function reverseJournalEntry(params: {
   organizationId: string;
   journalEntryId: string;
   reason?: string;
+  reversalDate?: string;
+  accountingPeriodId?: string;
   actorUserId: string;
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const result = await withTenantTransaction(params.organizationId, async (tx) => {
-    const [original] = await tx
-      .select()
-      .from(journalEntries)
-      .where(
-        and(
-          eq(journalEntries.id, params.journalEntryId),
-          eq(journalEntries.organizationId, params.organizationId)
-        )
-      )
-      .limit(1);
-
-    if (!original) {
-      throw new ApiError(404, "JOURNAL_NOT_FOUND", "سند حسابداری یافت نشد.");
-    }
-    if (original.status !== "POSTED") {
-      throw new ApiError(
-        409,
-        "ONLY_POSTED_REVERSIBLE",
-        "فقط اسناد قطعی (POSTED) قابل صدور سند معکوس هستند."
-      );
-    }
-
-    const origLines = await tx
-      .select()
-      .from(journalEntryLines)
-      .where(eq(journalEntryLines.journalEntryId, original.id));
-
-    const reversedLines: JournalLineInput[] = origLines.map((l) => ({
-      accountId: l.accountId,
-      costCenterId: l.costCenterId,
-      contactId: l.contactId,
-      debit: l.credit, // swap!
-      credit: l.debit, // swap!
-      description: `معکوس سند #${original.entryNumber}: ${l.description ?? ""}`,
-    }));
-
-    const reversal = await createJournalEntryTx(tx, {
-      organizationId: params.organizationId,
-      actorUserId: params.actorUserId,
-      actorEmail: params.actorEmail,
-      fiscalYearId: original.fiscalYearId,
-      entryDate: new Date().toISOString().slice(0, 10),
-      description: `سند معکوس بابت اصلاح سند شماره ${original.entryNumber}${params.reason ? ` — ${params.reason}` : ""}`,
-      referenceType: "REVERSAL",
-      referenceId: original.id,
-      postImmediately: true,
-      lines: reversedLines,
-    });
-
-    await tx
-      .update(journalEntries)
-      .set({
-        reversedEntryId: original.id,
-      })
-      .where(eq(journalEntries.id, reversal.entry.id));
-
-    const [markedOrig] = await tx
-      .update(journalEntries)
-      .set({
-        status: "REVERSED",
-        version: original.version + 1,
-        syncSeq: Date.now(),
-        updatedAt: new Date(),
-      })
-      .where(eq(journalEntries.id, original.id))
-      .returning();
-
-    return { original: markedOrig, reversal: reversal.entry, lines: reversal.lines };
-  });
+  const result = await withTenantTransaction(params.organizationId, (tx) => reverseJournalEntryTx(tx, params));
 
   await recordAuditLog({
     organizationId: params.organizationId,

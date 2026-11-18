@@ -31,10 +31,12 @@ import {
   formatQty,
   SessionMeResponse,
 } from "@/lib/format";
+import { currentJalaliDate } from "@/lib/jalali";
 import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
 import { GlassDashboard } from "./GlassDashboard";
 import { UserAccessSettings } from "./UserAccessSettings";
 import { FiscalLifecyclePanel } from "./FiscalLifecyclePanel";
+import { AccountingParityPanel, CommerceParityPanel, InventoryParityPanel, TreasuryParityPanel } from "./BusinessParityPanels";
 import { Award, BarChart3, CalendarRange, Settings, Sparkles, Wallet, Zap } from "lucide-react";
 
 type OrgTab =
@@ -107,7 +109,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   const [profitLoss, setProfitLoss] = useState<Record<string, unknown> | null>(null);
   const [showJournalForm, setShowJournalForm] = useState(false);
   const [jForm, setJForm] = useState({
-    document_date: new Date().toISOString().slice(0, 10),
+    document_date_jalali: currentJalaliDate(),
     description: "",
     confirm_immediately: true,
     accounting_period_id: "",
@@ -359,7 +361,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({
           client_document_id: crypto.randomUUID(),
-          document_date: jForm.document_date,
+          document_date_jalali: jForm.document_date_jalali,
           description: jForm.description,
           confirm_immediately: jForm.confirm_immediately,
           ...(jForm.accounting_period_id ? { accounting_period_id: jForm.accounting_period_id } : {}),
@@ -429,7 +431,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         organizationId: orgId,
         body: JSON.stringify({
           ...transferForm,
-          transfer_date: new Date().toISOString().slice(0, 10),
+          transfer_date_jalali: currentJalaliDate(),
         }),
       });
       onToast("انتقال اتمیک انبار انجام شد: خروج از مبدأ و ورود به مقصد در یک تراکنش ثبت گردید.");
@@ -447,7 +449,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         organizationId: orgId,
         body: JSON.stringify({
           warehouse_id: countForm.warehouse_id,
-          count_date: new Date().toISOString().slice(0, 10),
+          count_date_jalali: currentJalaliDate(),
           notes: countForm.notes,
           items: [{ product_id: countForm.product_id, counted_qty: countForm.counted_qty }],
         }),
@@ -516,7 +518,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           client_document_id: crypto.randomUUID(),
           customer_id: saleForm.customer_id,
           warehouse_id: saleForm.warehouse_id,
-          document_date: new Date().toISOString().slice(0, 10),
+          document_date_jalali: currentJalaliDate(),
           items: [
             {
               product_id: saleForm.product_id,
@@ -560,7 +562,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           account_id: txForm.account_id,
           amount: txForm.amount,
           payment_method: txForm.payment_method,
-          transaction_date: new Date().toISOString().slice(0, 10),
+          transaction_date_jalali: currentJalaliDate(),
           description: txForm.description,
         }),
       });
@@ -1051,11 +1053,11 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               <form onSubmit={submitJournal} className="bg-white rounded-2xl border border-emerald-200 p-5 space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">تاریخ سند (YYYY-MM-DD)</label>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">تاریخ سند شمسی (YYYY/MM/DD)</label>
                     <input
                       dir="ltr"
-                      value={jForm.document_date}
-                      onChange={(e) => setJForm({ ...jForm, document_date: e.target.value })}
+                      value={jForm.document_date_jalali}
+                      onChange={(e) => setJForm({ ...jForm, document_date_jalali: e.target.value })}
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-left"
                     />
                   </div>
@@ -1294,7 +1296,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                     </span>
                     {profitLoss && (
                       <span className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-800 font-semibold tabular-nums">
-                        سود خالص: {formatIrr(profitLoss.net_profit as string)} ریال
+                        سود خالص: {formatIrr((profitLoss.net_profit ?? profitLoss.netProfit) as string)} ریال
                       </span>
                     )}
                   </div>
@@ -1312,19 +1314,20 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                   </thead>
                   <tbody className="divide-y divide-slate-100 tabular-nums">
                     {((trialBalance.rows as Array<Record<string, unknown>>) ?? []).map((r) => (
-                      <tr key={String(r.account_id)}>
+                      <tr key={String(r.account_id ?? r.accountId)}>
                         <td className="px-3 py-2 font-mono">{String(r.code)}</td>
                         <td className="px-3 py-2 font-medium">{String(r.name)}</td>
-                        <td className="px-3 py-2 text-[11px] font-mono text-slate-500">{String(r.account_type)}</td>
-                        <td className="px-3 py-2">{formatIrr(r.total_debit as string)}</td>
-                        <td className="px-3 py-2">{formatIrr(r.total_credit as string)}</td>
-                        <td className="px-3 py-2 font-semibold">{formatIrr(r.net_balance as string)}</td>
+                        <td className="px-3 py-2 text-[11px] font-mono text-slate-500">{String(r.account_type ?? r.accountType)}</td>
+                        <td className="px-3 py-2">{formatIrr((r.total_debit ?? r.totalDebit) as string)}</td>
+                        <td className="px-3 py-2">{formatIrr((r.total_credit ?? r.totalCredit) as string)}</td>
+                        <td className="px-3 py-2 font-semibold">{formatIrr((r.net_balance ?? r.netBalance) as string)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             )}
+            <AccountingParityPanel orgId={orgId} onToast={onToast} />
           </div>
         )}
 
@@ -1508,6 +1511,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 </tbody>
               </table>
             </div>
+            <InventoryParityPanel orgId={orgId} onToast={onToast} />
           </div>
         )}
 
@@ -1806,6 +1810,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 </div>
               </div>
             </div>
+            <CommerceParityPanel orgId={orgId} contacts={contactsList} products={productsList} warehouses={warehousesList} sales={salesList} purchases={purchasesList} onToast={onToast} onRefresh={() => loadTab("commerce")} />
           </div>
         )}
 
@@ -1907,6 +1912,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 ))}
               </div>
             </div>
+            <TreasuryParityPanel orgId={orgId} onToast={onToast} />
           </div>
         )}
 

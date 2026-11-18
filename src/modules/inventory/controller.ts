@@ -22,6 +22,7 @@ import {
   parseListQuery,
 } from "@/lib/errors";
 import { checkIdempotency, saveIdempotency } from "@/lib/idempotency";
+import { resolveCanonicalDate } from "@/lib/jalali";
 import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
 import {
   approveStockCount,
@@ -53,7 +54,8 @@ const createWhSchema = z.object({
 const stockDocSchema = z.object({
   client_document_id: z.string().uuid().optional(),
   warehouse_id: z.string().uuid(),
-  document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  document_date_jalali: z.string().optional(),
   reference_number: z.string().optional(),
   description: z.string().min(2).default("سند انبار"),
   items: z
@@ -74,6 +76,7 @@ const transferSchema = z.object({
   product_id: z.string().uuid(),
   quantity: z.string().regex(/^\d+(\.\d{1,4})?$/),
   transfer_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  transfer_date_jalali: z.string().optional(),
   document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   notes: z.string().optional(),
   description: z.string().optional(),
@@ -82,6 +85,7 @@ const transferSchema = z.object({
 const countSchema = z.object({
   warehouse_id: z.string().uuid(),
   count_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  count_date_jalali: z.string().optional(),
   document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   notes: z.string().optional(),
   items: z
@@ -462,7 +466,7 @@ export async function handleWarehouseAndInventoryRoutes(
             organizationId: ctx.organizationId,
             warehouseId: body.warehouse_id,
             documentType: docType,
-            documentDate: body.document_date,
+            documentDate: resolveCanonicalDate(body.document_date, body.document_date_jalali),
             reason: body.description,
             actorUserId: ctx.userId,
             items: body.items.map((it) => ({
@@ -598,7 +602,7 @@ export async function handleWarehouseAndInventoryRoutes(
           targetWarehouseId: targetWh,
           productId: body.product_id,
           quantity: body.quantity,
-          transferDate: body.transfer_date || body.document_date || new Date().toISOString().slice(0, 10),
+          transferDate: resolveCanonicalDate(body.transfer_date || body.document_date, body.transfer_date_jalali),
           notes: body.notes || body.description,
           actorUserId: ctx.userId,
           actorEmail: ctx.email,
@@ -772,7 +776,7 @@ export async function handleWarehouseAndInventoryRoutes(
         const res = await approveStockCount({
           organizationId: ctx.organizationId,
           warehouseId: body.warehouse_id,
-          countDate: body.count_date || body.document_date || new Date().toISOString().slice(0, 10),
+          countDate: resolveCanonicalDate(body.count_date || body.document_date, body.count_date_jalali),
           notes: body.notes,
           items: body.items.map((i) => ({
             productId: i.product_id,

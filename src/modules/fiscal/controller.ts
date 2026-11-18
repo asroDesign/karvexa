@@ -6,6 +6,7 @@ import { accountingPeriods, accounts, fiscalYearClosings, fiscalYears } from "@/
 import { ensureSeeded } from "@/db/seed";
 import { ensurePrompt05OrgDefaults } from "@/db/seed-prompt05";
 import { ApiError, ok } from "@/lib/errors";
+import { recordAuditLog } from "@/lib/audit";
 import { checkIdempotency, saveIdempotency } from "@/lib/idempotency";
 import { requireOrgContext } from "@/lib/tenant";
 import {
@@ -21,6 +22,7 @@ import {
   reopenClosedFiscalYear,
   runPreClosingChecklist,
 } from "./service";
+import { createOrganizationAccount } from "@/modules/accounting/service";
 
 /**
  * Master Prompt 06 §7–§10 — Chart of Accounts, Opening Balances, Account Closure & Fiscal Year Lifecycle
@@ -50,9 +52,9 @@ export async function handleFiscalRoutes(
       const ctx = await requireOrgContext(req, "accounting.coa.manage", { requireActiveSubscription: true });
       const body = z
         .object({
-          group_id: z.string().uuid(),
+          group_id: z.string().uuid().optional(),
           parent_id: z.string().uuid().nullable().optional(),
-          account_level: z.number().int().min(1).max(4).default(3),
+          account_level: z.number().int().min(2).max(4).optional(),
           code: z.string().min(2).max(32),
           name: z.string().min(2).max(160),
           description: z.string().optional(),
@@ -61,24 +63,21 @@ export async function handleFiscalRoutes(
           is_postable: z.boolean().default(true),
         })
         .parse(await req.json());
-
-      const [created] = await db
-        .insert(accounts)
-        .values({
-          organizationId: ctx.organizationId,
-          groupId: body.group_id,
-          parentId: body.parent_id ?? null,
-          accountLevel: body.account_level,
-          code: body.code.trim(),
-          name: body.name.trim(),
-          description: body.description ?? null,
-          accountType: body.account_type,
-          normalBalance: body.normal_balance,
-          isPostable: body.is_postable,
-          accountStatus: "ACTIVE",
-          isActive: true,
-        })
-        .returning();
+      const created = await createOrganizationAccount({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        actorEmail: ctx.email,
+        ipAddress: ctx.ipAddress,
+        groupId: body.group_id,
+        parentId: body.parent_id,
+        accountLevel: body.account_level,
+        code: body.code,
+        name: body.name,
+        description: body.description,
+        accountType: body.account_type,
+        normalBalance: body.normal_balance,
+        isPostable: body.is_postable,
+      });
 
       return ok(created, 201);
     }
@@ -113,12 +112,51 @@ export async function handleFiscalRoutes(
 
     if (id && action === "activate" && method === "POST") {
       const ctx = await requireOrgContext(req, "accounting.coa.manage", { requireActiveSubscription: true });
+      const body = z.object({ reason: z.string().min(5, "ذکر دلیل فعال‌سازی حساب الزامی است.") }).parse(await req.json());
+      const [current] = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.id, id), eq(accounts.organizationId, ctx.organizationId)))
+        .limit(1);
+      if (!current) throw new ApiError(404, "ACCOUNT_NOT_FOUND", "حساب یافت نشد.");
+      if (current.isActive && current.accountStatus === "ACTIVE") {
+        throw new ApiError(409, "ACCOUNT_ALREADY_ACTIVE", "این حساب از قبل فعال است.");
+      }
+      if (current.parentId) {
+        const [parent] = await db
+          .select({ id: accounts.id, isActive: accounts.isActive, accountStatus: accounts.accountStatus })
+          .from(accounts)
+          .where(and(eq(accounts.id, current.parentId), eq(accounts.organizationId, ctx.organizationId)))
+          .limit(1);
+        if (!parent || !parent.isActive || parent.accountStatus !== "ACTIVE") {
+          throw new ApiError(409, "PARENT_ACCOUNT_INACTIVE", "ابتدا حساب والد را فعال کنید.");
+        }
+      }
       const [upd] = await db
         .update(accounts)
-        .set({ accountStatus: "ACTIVE", isActive: true, closedAt: null, closureReason: null })
+        .set({
+          accountStatus: "ACTIVE",
+          isActive: true,
+          closedAt: null,
+          closedBy: null,
+          closureReason: null,
+          version: current.version + 1,
+          updatedAt: new Date(),
+        })
         .where(and(eq(accounts.id, id), eq(accounts.organizationId, ctx.organizationId)))
         .returning();
-      if (!upd) throw new ApiError(404, "ACCOUNT_NOT_FOUND", "حساب یافت نشد.");
+      await recordAuditLog({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        actorEmail: ctx.email,
+        scope: "SECURITY",
+        action: "ACCOUNT_REACTIVATED",
+        entityType: "ACCOUNT",
+        entityId: upd.id,
+        ipAddress: ctx.ipAddress,
+        severity: "WARN",
+        metadata: { reason: body.reason, previousStatus: current.accountStatus },
+      });
       return ok(upd);
     }
   }

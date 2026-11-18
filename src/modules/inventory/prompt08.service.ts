@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from "drizzle-orm";
 import * as XLSX from "xlsx";
 import { db } from "@/db";
 import {
@@ -8,6 +8,7 @@ import {
   contactTransactions,
   financialAccounts,
   financialTransactions,
+  organizations,
   products,
   purchaseInvoices,
   reportExportJobs,
@@ -108,9 +109,16 @@ export async function createLandedWarehouseReceipt(params: {
   const remainingPayableDec = subDec(netAcquisitionDec, paidDec);
 
   // Proportionally allocate shipping + customs - discount to each item's effective landed unit cost
-  const allocatedItems = lineGrossMap.map((li) => {
+  let allocatedTotal = BigInt(0);
+  const allocatedItems = lineGrossMap.map((li, index) => {
     const shareRatio = divDec(li.lineGross, grossItemsTotal); // scale-4 fraction
-    const allocatedLineCost = mulDec(netAcquisitionDec, shareRatio);
+    // Assign any cent rounding remainder to the final line so the ledger cost
+    // equals the AP/inventory journal exactly.
+    const allocatedLineCost =
+      index === lineGrossMap.length - 1
+        ? subDec(netAcquisitionDec, allocatedTotal)
+        : mulDec(netAcquisitionDec, shareRatio);
+    allocatedTotal = addDec(allocatedTotal, allocatedLineCost);
     const effectiveUnitCost = divDec(allocatedLineCost, li.qty);
     return {
       productId: li.product_id,
@@ -118,10 +126,13 @@ export async function createLandedWarehouseReceipt(params: {
       direction: "IN" as const,
       quantity: li.quantity,
       unitCost: formatDecimal(effectiveUnitCost, 4),
+      totalCost: formatDecimal(allocatedLineCost, 2),
     };
   });
 
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, params.organizationId)).limit(1);
+    if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
     // Verify supplier exists in this org
     const [supplier] = await tx
       .select()
@@ -150,6 +161,11 @@ export async function createLandedWarehouseReceipt(params: {
       if (!params.paymentBankAccountId) {
         throw new ApiError(422, "PAYMENT_BANK_ACCOUNT_REQUIRED", "برای ثبت مبلغ پرداختی، انتخاب حساب بانکی/خزانه الزامی است.");
       }
+      await tx.execute(sql`
+        SELECT id FROM financial_accounts
+        WHERE id = ${params.paymentBankAccountId} AND organization_id = ${params.organizationId}
+        FOR UPDATE
+      `);
       const [fa] = await tx
         .select()
         .from(financialAccounts)
@@ -161,13 +177,18 @@ export async function createLandedWarehouseReceipt(params: {
         )
         .limit(1);
       if (!fa) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب بانکی/خزانه انتخاب‌شده یافت نشد.");
+      if (!fa.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", "حساب بانکی/خزانه غیرفعال است.");
+      if (fa.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", `پرداخت رسید باید با حساب دارای ارز پایه ${organization.baseCurrency} انجام شود.`);
+      if ((fa.accountType === "CASHBOX" || fa.accountType === "CASH") && gtDec(paidDec, parseDecimal(fa.balance))) {
+        throw new ApiError(422, "INSUFFICIENT_CASH_BALANCE", "موجودی صندوق برای پرداخت رسید کافی نیست.");
+      }
       paymentFinAcc = fa;
 
       const nextBal = subDec(fa.balance, paidDec);
       await tx
         .update(financialAccounts)
-        .set({ balance: formatDecimal(nextBal, 2), updatedAt: new Date() })
-        .where(eq(financialAccounts.id, fa.id));
+        .set({ balance: formatDecimal(nextBal, 2), version: fa.version + 1, updatedAt: new Date() })
+        .where(and(eq(financialAccounts.id, fa.id), eq(financialAccounts.version, fa.version)));
 
       await tx.insert(financialTransactions).values({
         organizationId: params.organizationId,
@@ -176,6 +197,7 @@ export async function createLandedWarehouseReceipt(params: {
         txType: "PAYMENT",
         paymentMethod: fa.accountType === "CASHBOX" ? "CASH" : "BANK_TRANSFER",
         amount: formatDecimal(paidDec, 2),
+        currency: organization.baseCurrency,
         txDate: canonicalDate,
         trackingNumber: params.supplierInvoiceNumber,
         relatedDocumentType: "WAREHOUSE_RECEIPT",
@@ -197,8 +219,10 @@ export async function createLandedWarehouseReceipt(params: {
     const cashAcc = byRole.get("CASH");
 
     let journalEntry = null;
-    if (invAcc && apAcc && isPositiveDec(netAcquisitionDec)) {
-      const jLines: JournalLineInput[] = [
+    if (!invAcc || (isPositiveDec(remainingPayableDec) && !apAcc)) {
+      throw new ApiError(422, "PURCHASE_ACCOUNTS_MISSING", "حساب موجودی کالا و حساب پرداختنی برای ثبت رسید خرید باید در کدینگ فعال باشند.");
+    }
+    const jLines: JournalLineInput[] = [
         {
           accountId: invAcc.id,
           debit: formatDecimal(netAcquisitionDec, 2),
@@ -206,31 +230,30 @@ export async function createLandedWarehouseReceipt(params: {
           description: `بهای تمام‌شده رسید انبار ${stockRes.document.documentNumber} (شامل حمل و گمرک پس از تخفیف)`,
         },
       ];
-      if (isPositiveDec(paidDec)) {
+    if (isPositiveDec(paidDec)) {
         const payGlId =
           paymentFinAcc?.accountId ??
           (paymentFinAcc?.accountType === "CASHBOX" ? cashAcc?.id : bankAcc?.id) ??
           bankAcc?.id;
-        if (payGlId) {
-          jLines.push({
-            accountId: payGlId,
-            debit: "0.00",
-            credit: formatDecimal(paidDec, 2),
-            description: `پرداخت نقدی/بانکی به ${supplier.name} بابت فاکتور ${params.supplierInvoiceNumber}`,
-          });
-        }
-      }
-      if (isPositiveDec(remainingPayableDec)) {
+        if (!payGlId) throw new ApiError(422, "TREASURY_GL_MAPPING_MISSING", "حساب دفتر کل متناظر با حساب پرداخت رسید تنظیم نشده است.");
         jLines.push({
-          accountId: apAcc.id,
-          contactId: supplier.id,
+          accountId: payGlId,
           debit: "0.00",
-          credit: formatDecimal(remainingPayableDec, 2),
-          description: `بستانکاری تأمین‌کننده (${supplier.name}) بابت مانده فاکتور ${params.supplierInvoiceNumber}`,
+          credit: formatDecimal(paidDec, 2),
+          description: `پرداخت نقدی/بانکی به ${supplier.name} بابت فاکتور ${params.supplierInvoiceNumber}`,
         });
       }
+    if (isPositiveDec(remainingPayableDec)) {
+      jLines.push({
+        accountId: apAcc!.id,
+        contactId: supplier.id,
+        debit: "0.00",
+        credit: formatDecimal(remainingPayableDec, 2),
+        description: `بستانکاری تأمین‌کننده (${supplier.name}) بابت مانده فاکتور ${params.supplierInvoiceNumber}`,
+      });
+    }
 
-      const jr = await createJournalEntryTx(tx, {
+    const jr = await createJournalEntryTx(tx, {
         organizationId: params.organizationId,
         actorUserId: params.actorUserId,
         actorEmail: params.actorEmail,
@@ -241,8 +264,7 @@ export async function createLandedWarehouseReceipt(params: {
         postImmediately: true,
         lines: jLines,
       });
-      journalEntry = jr.entry;
-    }
+    journalEntry = jr.entry;
 
     // 4. Post Supplier Account Ledger entries (Credit net acquisition + Debit immediate payment)
     await tx.insert(contactTransactions).values({
@@ -859,6 +881,9 @@ export async function recordSupplierSettlement(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
+  if (params.paymentMethod === "CHEQUE") {
+    throw new ApiError(422, "USE_CHEQUE_WORKFLOW", "برای پرداخت با چک، چک پرداختنی را از ماژول چک‌ها صادر کنید؛ ثبت تسویه نقدی/بانکی با روش چک مجاز نیست.");
+  }
   const amtDec = parseDecimal(params.amount);
   if (!isPositiveDec(amtDec)) {
     throw new ApiError(422, "AMOUNT_INVALID", "مبلغ تسویه تأمین‌کننده باید بزرگ‌تر از صفر باشد.");
@@ -866,24 +891,90 @@ export async function recordSupplierSettlement(params: {
   const canonicalDate = resolveCanonicalDate(params.settlementDate, params.settlementDateJalali);
 
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
+    await tx.execute(sql`
+      SELECT id FROM contacts
+      WHERE id = ${params.supplierId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [supplier] = await tx
       .select()
       .from(contacts)
       .where(and(eq(contacts.id, params.supplierId), eq(contacts.organizationId, params.organizationId)))
       .limit(1);
     if (!supplier) throw new ApiError(404, "SUPPLIER_NOT_FOUND", "تأمین‌کننده یافت نشد.");
+    const [organization] = await tx.select({ baseCurrency: organizations.baseCurrency }).from(organizations).where(eq(organizations.id, params.organizationId)).limit(1);
+    if (!organization) throw new ApiError(404, "ORG_NOT_FOUND", "سازمان یافت نشد.");
 
+    await tx.execute(sql`
+      SELECT id FROM purchase_invoices
+      WHERE organization_id = ${params.organizationId}
+        AND contact_id = ${supplier.id}
+        AND status IN ('CONFIRMED', 'FINALIZED', 'PARTIALLY_RETURNED')
+        AND remaining_amount > 0
+      ORDER BY invoice_date, created_at, id
+      FOR UPDATE
+    `);
+    const openInvoices = await tx.select().from(purchaseInvoices).where(and(
+      eq(purchaseInvoices.organizationId, params.organizationId),
+      eq(purchaseInvoices.contactId, supplier.id),
+      inArray(purchaseInvoices.status, ["CONFIRMED", "FINALIZED", "PARTIALLY_RETURNED"]),
+      gt(purchaseInvoices.remainingAmount, "0.00")
+    )).orderBy(asc(purchaseInvoices.invoiceDate), asc(purchaseInvoices.createdAt), asc(purchaseInvoices.id));
+    let invoiceOutstanding = BigInt(0);
+    for (const invoice of openInvoices) invoiceOutstanding = addDec(invoiceOutstanding, invoice.remainingAmount);
+    const supplierLedger = await tx.select({ debit: contactTransactions.debit, credit: contactTransactions.credit }).from(contactTransactions).where(and(
+      eq(contactTransactions.organizationId, params.organizationId),
+      eq(contactTransactions.contactId, supplier.id)
+    ));
+    let ledgerPayable = BigInt(0);
+    for (const row of supplierLedger) ledgerPayable = addDec(ledgerPayable, subDec(row.credit, row.debit));
+    const payableAvailable = ledgerPayable < invoiceOutstanding ? ledgerPayable : invoiceOutstanding;
+    if (!isPositiveDec(payableAvailable) || gtDec(amtDec, payableAvailable)) {
+      throw new ApiError(422, "SETTLEMENT_EXCEEDS_PAYABLE", `مبلغ تسویه از بدهی باز تأمین‌کننده بیشتر است (حداکثر قابل تسویه: ${formatDecimal(payableAvailable, 2)}).`);
+    }
+    let remainingToAllocate = amtDec;
+    const invoiceAllocations: Array<{ invoiceId: string; invoiceNumber: string; amount: string }> = [];
+    for (const invoice of openInvoices) {
+      if (!isPositiveDec(remainingToAllocate)) break;
+      const invoiceBalance = parseDecimal(invoice.remainingAmount);
+      const applied = remainingToAllocate < invoiceBalance ? remainingToAllocate : invoiceBalance;
+      if (!isPositiveDec(applied)) continue;
+      const nextRemaining = subDec(invoiceBalance, applied);
+      await tx.update(purchaseInvoices).set({
+        paidAmount: formatDecimal(addDec(invoice.paidAmount, applied), 2),
+        remainingAmount: formatDecimal(nextRemaining, 2),
+        version: invoice.version + 1,
+        syncSeq: Date.now(),
+        updatedAt: new Date(),
+      }).where(and(eq(purchaseInvoices.id, invoice.id), eq(purchaseInvoices.version, invoice.version)));
+      invoiceAllocations.push({ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, amount: formatDecimal(applied, 2) });
+      remainingToAllocate = subDec(remainingToAllocate, applied);
+    }
+    if (isPositiveDec(remainingToAllocate)) {
+      throw new ApiError(409, "SUPPLIER_INVOICE_ALLOCATION_INCOMPLETE", "بخشی از پرداخت به فاکتورهای باز تخصیص نیافت؛ مانده‌ها را بررسی کنید.");
+    }
+
+    await tx.execute(sql`
+      SELECT id FROM financial_accounts
+      WHERE id = ${params.financialAccountId} AND organization_id = ${params.organizationId}
+      FOR UPDATE
+    `);
     const [fa] = await tx
       .select()
       .from(financialAccounts)
       .where(and(eq(financialAccounts.id, params.financialAccountId), eq(financialAccounts.organizationId, params.organizationId)))
       .limit(1);
     if (!fa) throw new ApiError(404, "TREASURY_ACCOUNT_NOT_FOUND", "حساب بانکی/صندوق یافت نشد.");
+    if (!fa.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", "حساب بانکی/صندوق غیرفعال است.");
+    if (fa.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", `تسویه باید از حسابی با ارز پایه ${organization.baseCurrency} انجام شود.`);
+    if ((fa.accountType === "CASHBOX" || fa.accountType === "CASH") && gtDec(amtDec, parseDecimal(fa.balance))) {
+      throw new ApiError(422, "INSUFFICIENT_CASH_BALANCE", "موجودی صندوق برای این پرداخت کافی نیست.");
+    }
 
     const nextBal = subDec(fa.balance, amtDec);
     await tx
       .update(financialAccounts)
-      .set({ balance: formatDecimal(nextBal, 2), updatedAt: new Date() })
+      .set({ balance: formatDecimal(nextBal, 2), version: fa.version + 1, updatedAt: new Date() })
       .where(eq(financialAccounts.id, fa.id));
 
     const orgAccs = await tx.select().from(accounts).where(eq(accounts.organizationId, params.organizationId));
@@ -891,25 +982,25 @@ export async function recordSupplierSettlement(params: {
     const bankAcc = orgAccs.find((a) => a.systemRole === "BANK");
     const cashAcc = orgAccs.find((a) => a.systemRole === "CASH");
     const glOutId = fa.accountId ?? (fa.accountType === "CASHBOX" ? cashAcc?.id : bankAcc?.id) ?? bankAcc?.id;
-
-    let journalEntry = null;
-    if (apAcc && glOutId) {
-      const jr = await createJournalEntryTx(tx, {
-        organizationId: params.organizationId,
-        actorUserId: params.actorUserId,
-        actorEmail: params.actorEmail,
-        entryDate: canonicalDate,
-        description: params.description || `تسویه بدهی تأمین‌کننده (${supplier.name})`,
-        referenceType: "SUPPLIER_SETTLEMENT",
-        referenceId: supplier.id,
-        postImmediately: true,
-        lines: [
-          { accountId: apAcc.id, contactId: supplier.id, debit: formatDecimal(amtDec, 2), credit: "0.00", description: `کاهش بدهی به ${supplier.name}` },
-          { accountId: glOutId, debit: "0.00", credit: formatDecimal(amtDec, 2), description: `پرداخت از ${fa.name}` },
-        ],
-      });
-      journalEntry = jr.entry;
+    if (!apAcc || !glOutId) {
+      throw new ApiError(422, "SUPPLIER_SETTLEMENT_ACCOUNTS_MISSING", "حساب‌های سیستمی پرداخت به تأمین‌کننده کامل نیست؛ ابتدا کدینگ حسابداری را اصلاح کنید.");
     }
+
+    const jr = await createJournalEntryTx(tx, {
+      organizationId: params.organizationId,
+      actorUserId: params.actorUserId,
+      actorEmail: params.actorEmail,
+      entryDate: canonicalDate,
+      description: params.description || `تسویه بدهی تأمین‌کننده (${supplier.name})`,
+      referenceType: "SUPPLIER_SETTLEMENT",
+      referenceId: supplier.id,
+      postImmediately: true,
+      lines: [
+        { accountId: apAcc.id, contactId: supplier.id, debit: formatDecimal(amtDec, 2), credit: "0.00", description: `کاهش بدهی به ${supplier.name}` },
+        { accountId: glOutId, debit: "0.00", credit: formatDecimal(amtDec, 2), description: `پرداخت از ${fa.name}` },
+      ],
+    });
+    const journalEntry = jr.entry;
 
     const [finTx] = await tx
       .insert(financialTransactions)
@@ -925,7 +1016,7 @@ export async function recordSupplierSettlement(params: {
         relatedDocumentType: "SUPPLIER_SETTLEMENT",
         relatedDocumentId: supplier.id,
         journalEntryId: journalEntry?.id ?? null,
-        description: params.description || `تسویه حساب تأمین‌کننده ${supplier.name}`,
+        description: `${params.description || `تسویه حساب تأمین‌کننده ${supplier.name}`} — ${invoiceAllocations.map((allocation) => `${allocation.invoiceNumber}: ${allocation.amount}`).join("، ")}`,
         createdBy: params.actorUserId,
       })
       .returning();
@@ -943,6 +1034,7 @@ export async function recordSupplierSettlement(params: {
 
     return {
       settlement: finTx,
+      allocated_invoices: invoiceAllocations,
       journal_entry: journalEntry,
       treasury_new_balance: formatDecimal(nextBal, 2),
       settlement_date_jalali: gregorianIsoToJalali(canonicalDate),

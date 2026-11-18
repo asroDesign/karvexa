@@ -20,10 +20,7 @@ import { resolveOrganizationEntitlements, withTenantTransaction } from "@/lib/te
 
 export type PaymentGatewayCode = "ZARINPAL" | "ZIBAL" | "BALLEH_PAY" | "SAMAN";
 
-const ENTITLEMENT_SIGNING_SECRET =
-  process.env.ENTITLEMENT_SIGNING_SECRET ||
-  process.env.JWT_SECRET ||
-  "karvexa-business-os-entitlement-hmac-secret-2026";
+const ENTITLEMENT_SIGNING_PRIVATE_KEY_BASE64 = process.env.ENTITLEMENT_SIGNING_PRIVATE_KEY_BASE64;
 
 export interface GatewayInitResult {
   authority: string;
@@ -403,29 +400,82 @@ export async function buildSignedEntitlementSnapshot(organizationId: string) {
   ]);
 
   const entitlementVersion = org?.entitlementVersion ?? 1;
-  const serverTime = new Date().toISOString();
+  const serverTimeMs = Date.now();
+  const serverTime = new Date(serverTimeMs).toISOString();
+  const maxOfflineGraceDays = 7;
+  const offlineValidUntilMs = serverTimeMs + maxOfflineGraceDays * 86_400_000;
+  const featureRows = await db.select().from(features);
+  const featureByCode = new Map(featureRows.map((feature) => [feature.code, feature]));
 
   const enabledFeatures: string[] = [];
   const featureLimits: Record<string, number | null> = {};
+  const entitlementRows = Object.entries(subState.entitlements)
+    .map(([code, entitlement]) => {
+      const feature = featureByCode.get(code);
+      return {
+        feature_key: code,
+        feature_title_fa: feature?.nameFa ?? code,
+        is_enabled: entitlement.enabled,
+        limit_value: entitlement.limitValue,
+        used_value: 0,
+        limit_unit: feature?.valueType === "LIMIT" || entitlement.limitValue !== null ? "count" : "boolean",
+        source_type: "PLAN",
+      };
+    })
+    .sort((a, b) => (a.feature_key < b.feature_key ? -1 : a.feature_key > b.feature_key ? 1 : 0));
   for (const [code, ent] of Object.entries(subState.entitlements)) {
     if (ent.enabled) enabledFeatures.push(code);
     featureLimits[code] = ent.limitValue;
   }
 
+  const startedAtMs = subState.subscription?.startsAt?.getTime() ?? serverTimeMs;
+  const expiresAtMs = subState.subscription?.expiresAt?.getTime() ?? null;
+  const booleanFeaturesCsv = entitlementRows
+    .filter((entitlement) => entitlement.limit_unit === "boolean" || entitlement.limit_value === null)
+    .map((entitlement) => `${entitlement.feature_key}=${entitlement.is_enabled}`)
+    .join(";");
+  const numericLimitsCsv = entitlementRows
+    .filter((entitlement) => entitlement.limit_unit !== "boolean" || entitlement.limit_value !== null)
+    .map((entitlement) => `${entitlement.feature_key}=${entitlement.limit_value ?? "UNLIMITED"}`)
+    .join(";");
+  const canonicalPayload = [
+    "karvexa:entitlement:v1",
+    organizationId,
+    subState.planCode,
+    subState.subscriptionStatus,
+    startedAtMs,
+    expiresAtMs ?? 0,
+    entitlementVersion,
+    serverTimeMs,
+    offlineValidUntilMs,
+    booleanFeaturesCsv,
+    numericLimitsCsv,
+  ].join("|");
+
   const payload = {
     contract_version: "2.0",
-    subscription_id: subState.subscription?.id ?? null,
+    subscription_id: subState.subscription?.id ?? `none-${organizationId}`,
     plan_id: subState.plan?.id ?? null,
     plan_code: subState.planCode,
     plan_name: subState.plan?.nameFa ?? "پلن رایگان پایه",
     plan_name_fa: subState.plan?.nameFa ?? "پلن رایگان پایه",
     status: subState.subscriptionStatus,
     subscription_status: subState.subscriptionStatus,
-    activated_at: subState.subscription?.startsAt?.toISOString() ?? null,
+    billing_cycle: (subState.plan?.billingDays ?? 30) >= 360 ? "ANNUAL" : "MONTHLY",
+    activated_at: new Date(startedAtMs).toISOString(),
+    started_at_ms: startedAtMs,
     expires_at: subState.subscription?.expiresAt?.toISOString() ?? null,
+    expires_at_ms: expiresAtMs,
     entitlement_version: entitlementVersion,
     organization_id: organizationId,
     operating_mode: org?.operatingMode ?? "CLOUD_SYNC",
+    allow_offline: true,
+    max_offline_grace_days: maxOfflineGraceDays,
+    server_time_ms: serverTimeMs,
+    offline_valid_until_ms: offlineValidUntilMs,
+    signature_algorithm: "ED25519",
+    signature_key_id: "karvexa-ent-ed25519-v1",
+    entitlements: entitlementRows,
     enabled_features: enabledFeatures,
     feature_limits: featureLimits,
     features: subState.entitlements,
@@ -433,13 +483,19 @@ export async function buildSignedEntitlementSnapshot(organizationId: string) {
     issued_at: serverTime,
   };
 
-  const signature = crypto
-    .createHmac("sha256", ENTITLEMENT_SIGNING_SECRET)
-    .update(JSON.stringify(payload))
-    .digest("hex");
+  if (!ENTITLEMENT_SIGNING_PRIVATE_KEY_BASE64) {
+    throw new ApiError(500, "ENTITLEMENT_SIGNING_KEY_NOT_CONFIGURED", "کلید خصوصی امضای مجوزهای اشتراک روی سرور پیکربندی نشده است.");
+  }
+  const signingKey = crypto.createPrivateKey({
+    key: Buffer.from(ENTITLEMENT_SIGNING_PRIVATE_KEY_BASE64, "base64"),
+    format: "der",
+    type: "pkcs8",
+  });
+  const signature = crypto.sign(null, Buffer.from(canonicalPayload, "utf8"), signingKey).toString("base64");
 
   return {
     ...payload,
+    snapshot_signature: signature,
     signature,
   };
 }
