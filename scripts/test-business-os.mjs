@@ -2467,26 +2467,40 @@ async function run() {
   assert.equal(migStart.status, 201);
   const migId = migStart.json.data.id;
 
+  const migrationBatchKey = cryptoMod.randomUUID();
+  const migrationBatch = {
+    batch_index: 1,
+    events: [
+      {
+        event_id: cryptoMod.randomUUID(),
+        idempotency_key: cryptoMod.randomUUID(),
+        entity_type: "contact",
+        entity_id: cryptoMod.randomUUID(),
+        operation: "CREATE",
+        payload: { code: "C-MIG-01", display_name: "مشتری مهاجرت‌شده از حالت آفلاین", type: "CUSTOMER" },
+      },
+    ],
+  };
   const migUpload = await req(`/api/v1/sync/cloud-migration/${migId}/upload-batch`, {
     method: "POST",
     token: regToken,
     orgId: regOrgId,
-    body: {
-      batch_index: 1,
-      events: [
-        {
-          event_id: cryptoMod.randomUUID(),
-          idempotency_key: cryptoMod.randomUUID(),
-          entity_type: "contact",
-          entity_id: cryptoMod.randomUUID(),
-          operation: "CREATE",
-          payload: { code: "C-MIG-01", display_name: "مشتری مهاجرت‌شده از حالت آفلاین", type: "CUSTOMER" },
-        },
-      ],
-    },
+    headers: { "Idempotency-Key": migrationBatchKey },
+    body: migrationBatch,
   });
   assert.equal(migUpload.status, 200);
   assert.equal(migUpload.json.data.batch_result.applied_count, 1);
+
+  const migUploadReplay = await req(`/api/v1/sync/cloud-migration/${migId}/upload-batch`, {
+    method: "POST",
+    token: regToken,
+    orgId: regOrgId,
+    headers: { "Idempotency-Key": migrationBatchKey },
+    body: migrationBatch,
+  });
+  assert.equal(migUploadReplay.status, 200);
+  assert.equal(migUploadReplay.json.meta.replayed, true);
+  assert.equal(migUploadReplay.json.data.migration.uploaded_batches, migUpload.json.data.migration.uploaded_batches);
 
   const migComp = await req(`/api/v1/sync/cloud-migration/${migId}/complete`, {
     method: "POST",

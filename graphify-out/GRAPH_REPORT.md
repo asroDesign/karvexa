@@ -1,9 +1,9 @@
-# Graph Report - karvexa  (2026-11-18)
+# Graph Report - karvexa  (2026-11-19)
 
 ## Corpus Check
-- 162 files · ~195,435 words
+- 162 files · ~195,519 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 3 file(s) not represented in the graph (top: (none) 1, .css 1, .tsbuildinfo 1)
+- Unclassified: 2 file(s) not represented in the graph (top: (none) 1, .css 1)
 
 ## Summary
 - 1458 nodes · 4745 edges · 130 communities (77 shown, 53 thin omitted)
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `fd576fa5`
+- Built from commit: `0a8bfaa1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -144,12 +144,12 @@
 2. `recordAuditLog()` - 107 edges
 3. `ok()` - 103 edges
 4. `apiFetch()` - 102 edges
-5. `ensureSeeded()` - 73 edges
-6. `withTenantTransaction()` - 73 edges
-7. `drizzle-orm` - 65 edges
-8. `formatDecimal()` - 65 edges
-9. `db` - 63 edges
-10. `parseDecimal()` - 63 edges
+5. `withTenantTransaction()` - 73 edges
+6. `ensureSeeded()` - 73 edges
+7. `formatDecimal()` - 65 edges
+8. `drizzle-orm` - 65 edges
+9. `parseDecimal()` - 63 edges
+10. `handleApiError()` - 63 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Shared Modular Monolith Core` --semantically_similar_to--> `Modular Monolith`  [INFERRED] [semantically similar]
@@ -501,16 +501,16 @@ Nodes (3): Allowed Manual Resolutions, Conflict Resolution API, Conflict Resolut
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `apiFetch()` connect `schema.ts` to `saas/controller.ts`, `lucide-react`, `Core Module Invariants`, `Advanced Modules UI`, `TypeScript Configuration`, `PlatformSaasAdmin`, `Module Status Tracker`?**
-  _High betweenness centrality (0.043) - this node is a cross-community bridge._
+  _High betweenness centrality (0.037) - this node is a cross-community bridge._
 - **What connects `Accounting Core Module`, `Audit Core Module`, `Catalog Core Module` to the rest of the system?**
   _231 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Finance Records` be split into smaller, more focused modules?**
   _Cohesion score 0.06828327362909893 - nodes in this community are weakly interconnected._
 - **Why does `next` connect `tenant.ts` to `Core Finance Records`, `ok`, `auth/controller.ts`, `schema.ts`, `tenant.ts`, `Core Module Invariants`, `Sync Entity Manifest`, `Advanced Modules UI`, `ensureSeeded`, `Fiscal Year Lifecycle`, `dependencies`?**
-  _High betweenness centrality (0.041) - this node is a cross-community bridge._
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
 - **Should `ok` be split into smaller, more focused modules?**
   _Cohesion score 0.08797814207650273 - nodes in this community are weakly interconnected._
 - **Why does `drizzle-orm` connect `tenant.ts` to `Core Finance Records`, `ok`, `auth/controller.ts`, `schema.ts`, `tenant.ts`, `Sync Entity Manifest`, `Advanced Modules UI`, `ensureSeeded`, `dependencies`?**
-  _High betweenness centrality (0.023) - this node is a cross-community bridge._
+  _High betweenness centrality (0.024) - this node is a cross-community bridge._
 - **Should `auth/controller.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.10782241014799154 - nodes in this community are weakly interconnected._

@@ -302,6 +302,15 @@ export async function handleCloudMigrationRoutes(
       })
       .parse(await req.json());
 
+    const idemKey = req.headers.get("idempotency-key");
+    const cachedBatch = await checkIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: `/api/v1/sync/cloud-migration/${mig.id}/upload-batch`,
+      payload: body,
+    });
+    if (cachedBatch) return ok(cachedBatch.responseBody, cachedBatch.statusCode, { replayed: true });
+
     const pushRes = await pushSyncBatch({
       organizationId: ctx.organizationId,
       userId: ctx.userId,
@@ -325,7 +334,17 @@ export async function handleCloudMigrationRoutes(
       .where(eq(cloudMigrationSessions.id, mig.id))
       .returning();
 
-    return ok({ migration: updatedMig, batch_result: pushRes });
+    const responseBody = { migration: updatedMig, batch_result: pushRes };
+    await saveIdempotency({
+      organizationId: ctx.organizationId,
+      key: idemKey,
+      endpoint: `/api/v1/sync/cloud-migration/${mig.id}/upload-batch`,
+      payload: body,
+      statusCode: 200,
+      responseBody,
+    });
+
+    return ok(responseBody);
   }
 
   // POST /api/v1/sync/cloud-migration/{session_id}/complete OR /initial-migration/{session_id}/confirm

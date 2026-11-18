@@ -36,9 +36,9 @@
     "semantic_hash": "e09d4170464a4ee9d73df0da73f405a6"
   },
   "scripts/test-business-os.mjs": {
-    "mtime": 1795031252.9166505,
-    "seen": 1795031353.556365,
-    "ast_hash": "6a21514c8de3f102e5b16de3a868cebd",
+    "mtime": 1795033374.9848964,
+    "seen": 1795034308.090542,
+    "ast_hash": "0dec649b49f567ced1009210a5cb1b87",
     "semantic_hash": ""
   },
   "src/app/about/page.tsx": {
@@ -474,10 +474,10 @@
     "semantic_hash": "fc298a9b3046c556097b529f02ee76b7"
   },
   "src/modules/offline-mode/controller.ts": {
-    "mtime": 1794985375.207168,
-    "seen": 1795024602.386994,
-    "ast_hash": "d93a6cf9005d3449a852157de49b5284",
-    "semantic_hash": "d93a6cf9005d3449a852157de49b5284"
+    "mtime": 1795033309.8199935,
+    "seen": 1795034308.090635,
+    "ast_hash": "f8398439cfa96e77f2a06967d0e54923",
+    "semantic_hash": ""
   },
   "src/modules/organizations/controller.ts": {
     "mtime": 1794905442.0,
