@@ -10,6 +10,7 @@ import {
   financialTransactions,
   organizations,
   products,
+  productVariants,
   purchaseInvoices,
   reportExportJobs,
   stockDocuments,
@@ -374,6 +375,50 @@ export async function createMultiItemTransfer(params: {
   const canonicalDate = resolveCanonicalDate(params.transferDate, params.transferDateJalali);
 
   const created = await withTenantTransaction(params.organizationId, async (tx) => {
+    const transferWarehouses = await tx
+      .select()
+      .from(warehouses)
+      .where(
+        and(
+          eq(warehouses.organizationId, params.organizationId),
+          inArray(warehouses.id, [params.sourceWarehouseId, params.destinationWarehouseId])
+        )
+      )
+      .orderBy(asc(warehouses.id))
+      .for("update");
+    const sourceWarehouse = transferWarehouses.find((warehouse) => warehouse.id === params.sourceWarehouseId);
+    const destinationWarehouse = transferWarehouses.find((warehouse) => warehouse.id === params.destinationWarehouseId);
+    if (!sourceWarehouse || !destinationWarehouse) {
+      throw new ApiError(404, "WAREHOUSE_NOT_FOUND", "انبار مبدأ یا مقصد در این کسب‌وکار پیدا نشد.");
+    }
+    if (!sourceWarehouse.isActive || !destinationWarehouse.isActive) {
+      throw new ApiError(409, "WAREHOUSE_INACTIVE", "انتقال فقط بین انبارهای فعال امکان‌پذیر است.");
+    }
+
+    const productIds = [...new Set(params.items.map((item) => item.product_id))];
+    const organizationProducts = await tx
+      .select({ id: products.id })
+      .from(products)
+      .where(and(eq(products.organizationId, params.organizationId), inArray(products.id, productIds)));
+    if (organizationProducts.length !== productIds.length) {
+      throw new ApiError(404, "PRODUCT_NOT_FOUND", "یک یا چند کالای حواله در این کسب‌وکار پیدا نشد.");
+    }
+
+    const variantIds = [...new Set(params.items.map((item) => item.variant_id).filter((id): id is string => Boolean(id)))];
+    const organizationVariants = variantIds.length
+      ? await tx
+          .select({ id: productVariants.id, productId: productVariants.productId })
+          .from(productVariants)
+          .where(and(eq(productVariants.organizationId, params.organizationId), inArray(productVariants.id, variantIds)))
+      : [];
+    if (organizationVariants.length !== variantIds.length) {
+      throw new ApiError(404, "PRODUCT_VARIANT_NOT_FOUND", "یک یا چند تنوع کالا در این کسب‌وکار پیدا نشد.");
+    }
+    const variantProducts = new Map(organizationVariants.map((variant) => [variant.id, variant.productId]));
+    if (params.items.some((item) => item.variant_id && variantProducts.get(item.variant_id) !== item.product_id)) {
+      throw new ApiError(422, "VARIANT_PRODUCT_MISMATCH", "تنوع انتخاب‌شده متعلق به کالای همان ردیف نیست.");
+    }
+
     const trNumber = `TR-${Date.now().toString().slice(-6)}`;
     let totalQty = BigInt(0);
     for (const it of params.items) {
@@ -441,21 +486,25 @@ export async function submitMultiItemTransfer(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const [tr] = await db
-    .select()
-    .from(stockTransfers)
-    .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
-    .limit(1);
-  if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال انبار یافت نشد.");
-  if (tr.status !== "DRAFT") {
-    throw new ApiError(409, "TRANSFER_INVALID_STATE", `فقط حواله انتقال پیش‌نویس (DRAFT) قابل ارسال برای تایید (SUBMITTED) است (وضعیت فعلی: ${tr.status}).`);
-  }
+  const submitted = await withTenantTransaction(params.organizationId, async (tx) => {
+    const [tr] = await tx
+      .select()
+      .from(stockTransfers)
+      .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
+      .for("update")
+      .limit(1);
+    if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال انبار یافت نشد.");
+    if (tr.status !== "DRAFT") {
+      throw new ApiError(409, "TRANSFER_INVALID_STATE", `فقط حواله انتقال پیش‌نویس (DRAFT) قابل ارسال برای تایید (SUBMITTED) است (وضعیت فعلی: ${tr.status}).`);
+    }
 
-  const [submitted] = await db
-    .update(stockTransfers)
-    .set({ status: "SUBMITTED" })
-    .where(eq(stockTransfers.id, tr.id))
-    .returning();
+    const [updated] = await tx
+      .update(stockTransfers)
+      .set({ status: "SUBMITTED" })
+      .where(and(eq(stockTransfers.id, tr.id), eq(stockTransfers.organizationId, params.organizationId)))
+      .returning();
+    return updated;
+  });
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -464,7 +513,7 @@ export async function submitMultiItemTransfer(params: {
     scope: "ORGANIZATION",
     action: "WAREHOUSE_TRANSFER_SUBMITTED",
     entityType: "STOCK_TRANSFER",
-    entityId: tr.id,
+    entityId: params.transferId,
     ipAddress: params.ipAddress,
   });
 
@@ -486,6 +535,7 @@ export async function dispatchMultiItemTransfer(params: {
       .select()
       .from(stockTransfers)
       .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
+      .for("update")
       .limit(1);
     if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال انبار یافت نشد.");
     if (!["DRAFT", "SUBMITTED"].includes(tr.status)) {
@@ -593,6 +643,7 @@ export async function receiveMultiItemTransfer(params: {
       .select()
       .from(stockTransfers)
       .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
+      .for("update")
       .limit(1);
     if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال یافت نشد.");
     if (!["IN_TRANSIT", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(tr.status)) {
@@ -770,21 +821,40 @@ export async function completeWarehouseTransfer(params: {
   actorEmail: string;
   ipAddress?: string | null;
 }) {
-  const [tr] = await db
-    .select()
-    .from(stockTransfers)
-    .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
-    .limit(1);
-  if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال یافت نشد.");
-  if (!["RECEIVED", "DISCREPANCY_REPORTED", "PARTIALLY_RECEIVED"].includes(tr.status)) {
-    throw new ApiError(409, "TRANSFER_CANNOT_COMPLETE", `تکمیل انتقال با وضعیت ${tr.status} مجاز نیست.`);
-  }
+  const completed = await withTenantTransaction(params.organizationId, async (tx) => {
+    const [tr] = await tx
+      .select()
+      .from(stockTransfers)
+      .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
+      .for("update")
+      .limit(1);
+    if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال یافت نشد.");
+    if (!["RECEIVED", "DISCREPANCY_REPORTED"].includes(tr.status)) {
+      throw new ApiError(409, "TRANSFER_CANNOT_COMPLETE", "حواله تا ثبت کامل شمارش مقصد قابل بستن نیست.");
+    }
 
-  const [completed] = await db
-    .update(stockTransfers)
-    .set({ status: "COMPLETED", completedAt: new Date() })
-    .where(eq(stockTransfers.id, tr.id))
-    .returning();
+    const items = await tx
+      .select()
+      .from(stockTransferItems)
+      .where(eq(stockTransferItems.stockTransferId, tr.id));
+    const hasUnaccountedQuantity = items.some((item) => {
+      const accounted = addDec(
+        item.quantityAccepted,
+        addDec(item.quantityMissing, addDec(item.quantityDamaged, item.quantityRejected))
+      );
+      return gtDec(parseDecimal(item.quantitySent), accounted);
+    });
+    if (hasUnaccountedQuantity) {
+      throw new ApiError(409, "TRANSFER_RECEIPT_INCOMPLETE", "برای تک‌تک اقلام باید مقدار پذیرفته‌شده یا نوع مغایرت ثبت شود.");
+    }
+
+    const [updated] = await tx
+      .update(stockTransfers)
+      .set({ status: "COMPLETED", completedAt: new Date() })
+      .where(and(eq(stockTransfers.id, tr.id), eq(stockTransfers.organizationId, params.organizationId)))
+      .returning();
+    return updated;
+  });
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -793,14 +863,62 @@ export async function completeWarehouseTransfer(params: {
     scope: "ORGANIZATION",
     action: "WAREHOUSE_TRANSFER_COMPLETED",
     entityType: "STOCK_TRANSFER",
-    entityId: tr.id,
+    entityId: params.transferId,
     ipAddress: params.ipAddress,
   });
 
   return completed;
 }
 
+export async function cancelMultiItemTransfer(params: {
+  organizationId: string;
+  transferId: string;
+  reason: string;
+  actorUserId: string;
+  actorEmail: string;
+  ipAddress?: string | null;
+}) {
+  const cancelled = await withTenantTransaction(params.organizationId, async (tx) => {
+    const [tr] = await tx
+      .select()
+      .from(stockTransfers)
+      .where(and(eq(stockTransfers.id, params.transferId), eq(stockTransfers.organizationId, params.organizationId)))
+      .for("update")
+      .limit(1);
+    if (!tr) throw new ApiError(404, "TRANSFER_NOT_FOUND", "سند انتقال یافت نشد.");
+    if (!["DRAFT", "SUBMITTED"].includes(tr.status)) {
+      throw new ApiError(409, "TRANSFER_CANNOT_CANCEL", "پس از ارسال کالا، حواله قابل ابطال نیست؛ مغایرت یا برگشت باید با سند مستقل ثبت شود.");
+    }
+
+    const reason = params.reason.trim();
+    const [updated] = await tx
+      .update(stockTransfers)
+      .set({
+        status: "CANCELLED",
+        notes: [tr.notes?.trim(), reason ? `[علت ابطال]: ${reason}` : null].filter(Boolean).join("\n") || null,
+      })
+      .where(and(eq(stockTransfers.id, tr.id), eq(stockTransfers.organizationId, params.organizationId)))
+      .returning();
+    return updated;
+  });
+
+  await recordAuditLog({
+    organizationId: params.organizationId,
+    actorUserId: params.actorUserId,
+    actorEmail: params.actorEmail,
+    scope: "ORGANIZATION",
+    action: "WAREHOUSE_TRANSFER_CANCELLED",
+    entityType: "STOCK_TRANSFER",
+    entityId: params.transferId,
+    ipAddress: params.ipAddress,
+    metadata: { reason: params.reason },
+  });
+
+  return cancelled;
+}
+
 // ============================================================================
+// 3. SUPPLIER ACCOUNT PROFILE// ============================================================================
 // 3. SUPPLIER ACCOUNT PROFILE & SETTLEMENTS (§2.6)
 // ============================================================================
 export async function getSupplierProfile(organizationId: string, supplierId: string) {

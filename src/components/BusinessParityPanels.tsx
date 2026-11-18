@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { apiFetch, formatIrr, formatQty } from "@/lib/format";
 import { currentJalaliDate, gregorianIsoToJalali } from "@/lib/jalali";
@@ -166,6 +166,23 @@ type ProductLine = { product_id: string; variant_id: string; quantity: string; u
 type ReceiveLine = { transfer_item_id: string; product_id: string; accepted_quantity: string; missing_qty: string; damaged_qty: string; rejected_quantity: string; discrepancy_description: string };
 type IssueLine = { product_id: string; variant_id: string; quantity: string; unit_cost: string };
 type TransferLine = { product_id: string; variant_id: string; quantity: string };
+type InventoryView = "overview" | "operations" | "ledger" | "transfers";
+const inventoryViews: Array<{ id: InventoryView; label: string }> = [
+  { id: "overview", label: "موجودی و انبارها" },
+  { id: "operations", label: "رسید، خروج و تسویه" },
+  { id: "ledger", label: "کاردکس و گردش" },
+  { id: "transfers", label: "حواله بین انبارها" },
+];
+const transferStatusLabels: Record<string, string> = {
+  DRAFT: "پیش‌نویس",
+  SUBMITTED: "تأییدشده برای ارسال",
+  IN_TRANSIT: "در مسیر",
+  PARTIALLY_RECEIVED: "تحویل بخشی",
+  RECEIVED: "تحویل کامل",
+  DISCREPANCY_REPORTED: "دارای مغایرت",
+  COMPLETED: "بسته‌شده",
+  CANCELLED: "ابطال‌شده",
+};
 
 export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null; onToast: Toast }) {
   const [warehouses, setWarehouses] = useState<Row[]>([]);
@@ -179,6 +196,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [receipts, setReceipts] = useState<Row[]>([]);
   const [issues, setIssues] = useState<Row[]>([]);
   const [stockSearch, setStockSearch] = useState("");
+  const [inventoryView, setInventoryView] = useState<InventoryView>("overview");
   const [transferSearch, setTransferSearch] = useState("");
   const [warehouseFilter, setWarehouseFilter] = useState("");
   const [movementDateFrom, setMovementDateFrom] = useState("");
@@ -192,13 +210,16 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [supplierProfile, setSupplierProfile] = useState<Row | null>(null);
   const [receipt, setReceipt] = useState({ warehouse_id: "", supplier_id: "", supplier_invoice_number: "", invoice_date_jalali: jalaliToday(), shipping_cost: "0.00", customs_and_extra_cost: "0.00", supplier_discount: "0.00", paid_amount: "0.00", payment_bank_account_id: "", description: "رسید خرید کالا" });
   const [receiptItems, setReceiptItems] = useState<ProductLine[]>([{ product_id: "", variant_id: "", quantity: "", unit_price: "" }]);
-  const [transferForm, setTransferForm] = useState({ source_warehouse_id: "", destination_warehouse_id: "", transfer_date_jalali: jalaliToday(), reason: "انتقال بین انبارها", notes: "" });
+  const [transferForm, setTransferForm] = useState({ source_warehouse_id: "", destination_warehouse_id: "", transfer_date_jalali: jalaliToday(), reason: "انتقال بین انبارها", source_responsible_name: "", destination_responsible_name: "", notes: "" });
   const [transferItems, setTransferItems] = useState<TransferLine[]>([{ product_id: "", variant_id: "", quantity: "" }]);
   const [selectedTransfer, setSelectedTransfer] = useState<Row | null>(null);
   const [receiveLines, setReceiveLines] = useState<ReceiveLine[]>([]);
   const [receiveDate, setReceiveDate] = useState(jalaliToday());
   const [settlement, setSettlement] = useState({ supplier_id: "", financial_account_id: "", amount: "0.00", payment_method: "BANK_TRANSFER", settlement_date_jalali: jalaliToday(), description: "تسویه حساب تأمین‌کننده" });
   const [busy, setBusy] = useState(false);
+  const [transferPendingAction, setTransferPendingAction] = useState("");
+  const transferRequestKeys = useRef(new Map<string, string>());
+  const transferRequestsInFlight = useRef(new Set<string>());
 
   const suppliers = useMemo(() => contacts.filter((item) => ["SUPPLIER", "VENDOR"].includes(text(item.type ?? item.contactType).toUpperCase())), [contacts]);
 
@@ -336,31 +357,85 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     popup.document.close();
   }
 
+  function printTransfer(transfer: Row) {
+    const escape = (value: unknown) => text(value, "—")
+      .replace(/[&<>]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[character] ?? character)
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+    const transferNumber = text(transfer.transferNumber ?? transfer.transfer_number, "حواله");
+    const sourceName = text(transfer.source_warehouse_name ?? transfer.sourceWarehouseName, "انبار مبدأ");
+    const destinationName = text(transfer.destination_warehouse_name ?? transfer.destinationWarehouseName, "انبار مقصد");
+    const sourceResponsible = text(transfer.sourceResponsibleName ?? transfer.source_responsible_name, "................................");
+    const destinationResponsible = text(transfer.destinationResponsibleName ?? transfer.destination_responsible_name, "................................");
+    const date = gregorianIsoToJalali(text(transfer.transferDate ?? transfer.transfer_date));
+    const status = transferStatusLabels[text(transfer.status)] ?? text(transfer.status, "—");
+    const itemRows = rows(transfer.items).map((item, index) => {
+      const variant = text(item.variant_name ?? item.variantName);
+      const sku = text(item.variant_sku ?? item.variantSku ?? item.product_sku ?? item.productSku);
+      return "<tr><td>" + (index + 1) + "</td><td>" + escape(item.product_name ?? item.productName) + (variant ? " · " + escape(variant) : "") + "<small>" + escape(sku) + "</small></td><td>" + escape(item.quantitySent ?? item.quantity_sent ?? item.quantity) + "</td><td>" + escape(item.quantityAccepted ?? item.quantity_accepted) + "</td><td>" + escape(item.quantityMissing ?? item.quantity_missing ?? "0") + "</td><td>" + escape(item.quantityDamaged ?? item.quantity_damaged ?? "0") + "</td><td>" + escape(item.quantityRejected ?? item.quantity_rejected ?? "0") + "</td><td>" + escape(item.discrepancyNote ?? item.discrepancy_note) + "</td></tr>";
+    }).join("");
+    const popup = window.open("", "_blank", "width=1000,height=760");
+    if (!popup) { onToast("پنجرهٔ چاپ توسط مرورگر مسدود شد.", "error"); return; }
+    popup.opener = null;
+    const html = '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><title>حواله ' + escape(transferNumber) + '</title>' +
+      '<style>body{font-family:Tahoma,sans-serif;margin:28px;color:#111}header{display:flex;justify-content:space-between;gap:20px;border-bottom:2px solid #222;padding-bottom:12px}h1{font-size:20px;margin:0 0 8px}table{width:100%;border-collapse:collapse;margin-top:20px;font-size:11px}th,td{border:1px solid #888;padding:7px;text-align:right}th{background:#eee}small{display:block;color:#555}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}.box{border:1px solid #999;border-radius:5px;padding:10px}.signatures{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:64px;text-align:center}.signatures div{border-top:1px solid #555;padding-top:8px;min-height:35px}@media print{body{margin:12mm}}</style>' +
+      '<header><div><h1>حواله انتقال بین انبارها</h1><div>' + escape(sourceName) + ' ← ' + escape(destinationName) + '</div></div><div>شماره: <b dir="ltr">' + escape(transferNumber) + '</b><br>تاریخ: ' + escape(date) + '<br>وضعیت: ' + escape(status) + '</div></header>' +
+      '<div class="meta"><div class="box">مسئول انبار مبدأ<br><b>' + escape(sourceResponsible) + '</b></div><div class="box">مسئول انبار مقصد<br><b>' + escape(destinationResponsible) + '</b></div><div class="box">شرح حواله<br><b>' + escape(transfer.reason ?? transfer.notes) + '</b></div></div>' +
+      '<table><thead><tr><th>ردیف</th><th>کالا / تنوع / کد</th><th>ارسالی</th><th>پذیرفته</th><th>کسری</th><th>آسیب</th><th>ردشده</th><th>شرح مغایرت</th></tr></thead><tbody>' + (itemRows || '<tr><td colspan="8">قلمی ثبت نشده است.</td></tr>') + '</tbody></table>' +
+      '<div class="signatures"><div>ثبت‌کنندهٔ حواله</div><div>امضای تحویل‌دهندهٔ مبدأ<br>' + escape(sourceResponsible) + '</div><div>امضای تحویل‌گیرندهٔ مقصد<br>' + escape(destinationResponsible) + '</div></div><script>window.onload=function(){window.print()}</script></html>';
+    popup.document.write(html);
+    popup.document.close();
+  }
+
   async function createTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!orgId) return;
+    const requestId = "transfer:create";
+    if (transferRequestsInFlight.current.has(requestId)) return;
     const validItems = transferItems.filter((line) => line.product_id && Number(line.quantity) > 0);
     if (!transferForm.source_warehouse_id || !transferForm.destination_warehouse_id || transferForm.source_warehouse_id === transferForm.destination_warehouse_id || validItems.length === 0) {
       onToast("انبار مبدأ و مقصد متفاوت و دست‌کم یک کالای دارای مقدار مثبت لازم است.", "error");
       return;
     }
+    if (!transferForm.source_responsible_name.trim() || !transferForm.destination_responsible_name.trim()) {
+      onToast("نام مسئول انبار مبدأ و مقصد را برای حواله ثبت کنید.", "error");
+      return;
+    }
+    transferRequestsInFlight.current.add(requestId);
+    setTransferPendingAction(requestId);
+    const idempotencyKey = transferRequestKeys.current.get(requestId) ?? crypto.randomUUID();
+    transferRequestKeys.current.set(requestId, idempotencyKey);
     try {
       await apiFetch("/api/v1/inventory/transfers", {
-        method: "POST", organizationId: orgId, headers: { "Idempotency-Key": crypto.randomUUID() },
+        method: "POST", organizationId: orgId, headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ ...transferForm, dispatch_immediately: false, items: validItems.map((line) => ({ ...line, variant_id: line.variant_id || null })) }),
       });
-      onToast("حوالهٔ چندقلمی به شکل پیش‌نویس ایجاد شد؛ موجودی تا زمان ارسال از مبدأ کم نمی‌شود.");
+      transferRequestKeys.current.delete(requestId);
+      onToast("حوالهٔ چندقلمی با مسئولان مبدأ و مقصد ثبت شد؛ برگهٔ چاپی حواله در دسترس است.");
       await reload();
     } catch (error) { onToast(error instanceof Error ? error.message : "ایجاد حواله ناموفق بود", "error"); }
+    finally { transferRequestsInFlight.current.delete(requestId); setTransferPendingAction(""); }
   }
 
   async function transferAction(id: string, action: "submit" | "dispatch" | "complete") {
     if (!orgId) return;
+    const requestId = "transfer:" + id + ":" + action;
+    if (transferRequestsInFlight.current.has(requestId)) return;
+    transferRequestsInFlight.current.add(requestId);
+    setTransferPendingAction(requestId);
+    const idempotencyKey = transferRequestKeys.current.get(requestId) ?? crypto.randomUUID();
+    transferRequestKeys.current.set(requestId, idempotencyKey);
     try {
-      await apiFetch(`/api/v1/inventory/transfers/${id}/${action}`, { method: "POST", organizationId: orgId, ...(action === "dispatch" ? { headers: { "Idempotency-Key": crypto.randomUUID() } } : {}) });
+      await apiFetch("/api/v1/inventory/transfers/" + id + "/" + action, {
+        method: "POST",
+        organizationId: orgId,
+        ...(action === "dispatch" ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
+      });
+      transferRequestKeys.current.delete(requestId);
       onToast(action === "submit" ? "حواله برای ارسال تأیید شد." : action === "dispatch" ? "کالا از موجودی مبدأ خارج و در مسیر ثبت شد." : "انتقال انبار تکمیل شد.");
       setSelectedTransfer(null); await reload();
     } catch (error) { onToast(error instanceof Error ? error.message : "تغییر وضعیت حواله ناموفق بود", "error"); }
+    finally { transferRequestsInFlight.current.delete(requestId); setTransferPendingAction(""); }
   }
 
   function openReceive(transfer: Row) {
@@ -381,14 +456,23 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   async function receiveTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!orgId || !selectedTransfer) return;
+    const transferId = text(selectedTransfer.id);
+    const requestId = "transfer:" + transferId + ":receive";
+    if (transferRequestsInFlight.current.has(requestId)) return;
+    transferRequestsInFlight.current.add(requestId);
+    setTransferPendingAction(requestId);
+    const idempotencyKey = transferRequestKeys.current.get(requestId) ?? crypto.randomUUID();
+    transferRequestKeys.current.set(requestId, idempotencyKey);
     try {
-      await apiFetch(`/api/v1/inventory/transfers/${text(selectedTransfer.id)}/receive`, {
-        method: "POST", organizationId: orgId, headers: { "Idempotency-Key": crypto.randomUUID() },
+      await apiFetch("/api/v1/inventory/transfers/" + transferId + "/receive", {
+        method: "POST", organizationId: orgId, headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ received_date_jalali: receiveDate, items: receiveLines.filter((line) => line.product_id) }),
       });
+      transferRequestKeys.current.delete(requestId);
       onToast("مقدار پذیرفته‌شده وارد مقصد شد و کسری/آسیب در گردش حواله ثبت شد.");
       setSelectedTransfer(null); await reload();
     } catch (error) { onToast(error instanceof Error ? error.message : "ثبت رسید انتقال ناموفق بود", "error"); }
+    finally { transferRequestsInFlight.current.delete(requestId); setTransferPendingAction(""); }
   }
 
   async function settleSupplier(event: FormEvent<HTMLFormElement>) {
@@ -412,7 +496,12 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     if (!options.length) return null;
     return <select className={field} aria-label="تنوع کالا" value={value} onChange={(event) => onChange(event.target.value)}><option value="">کالای پایه</option>{options.map((variant) => <option key={text(variant.id)} value={text(variant.id)}>{text(variant.variant_name)} ({text(variant.sku)})</option>)}</select>;
   };
-  const availableQty = (warehouseId: string, productId: string, variantId: string) => text(rows(stock?.balances).find((row) => text(row.warehouse_id) === warehouseId && text(row.product_id) === productId && text(row.variant_id) === variantId)?.on_hand_qty, "0.0000");
+  const availableQty = (warehouseId: string, productId: string, variantId: string) => {
+    const balance = rows(stock?.balances).find((row) => text(row.warehouse_id ?? row.warehouseId) === warehouseId && text(row.product_id ?? row.productId) === productId && text(row.variant_id ?? row.variantId) === variantId);
+    const onHand = Number(balance?.on_hand_qty ?? balance?.onHandQty ?? 0);
+    const reserved = Number(balance?.reserved_qty ?? balance?.reservedQty ?? 0);
+    return formatQty(Math.max(0, onHand - reserved));
+  };
   const warehouseSelect = (value: string, onChange: (value: string) => void) => <select className={field} required value={value} onChange={(event) => onChange(event.target.value)}>{warehouses.map((item) => <option key={text(item.id)} disabled={!Boolean(item.is_active ?? true)} value={text(item.id)}>{text(item.name)}{item.is_default ? " • اصلی" : ""}{!Boolean(item.is_active ?? true) ? " • غیرفعال" : ""}</option>)}</select>;
   const stockExportQuery = new URLSearchParams();
   if (warehouseFilter) stockExportQuery.set("warehouse_id", warehouseFilter);
@@ -431,6 +520,10 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   return (
     <section className="space-y-4 border-t border-slate-200 pt-5">
       <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-bold">رسید خرید، تسویه تأمین‌کننده و حواله مرحله‌ای</h3><p className="mt-1 text-xs text-slate-500">هزینهٔ تمام‌شده به تفکیک کالا تخصیص می‌یابد و جابجایی مرحله‌ای فقط با تأییدهای انبار ثبت می‌شود.</p></div><div className="flex flex-wrap gap-2">{orgId && <><button type="button" onClick={() => void downloadReport(`/api/v1/inventory/exports/stock${stockExportQuery.size ? `?${stockExportQuery}` : ""}`, orgId, `inventory-stock-${today()}.xlsx`, onToast)} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">خروجی موجودی</button><button type="button" onClick={() => void downloadReport(`/api/v1/inventory/exports/movements${movementExportQuery.size ? `?${movementExportQuery}` : ""}`, orgId, `inventory-movements-${today()}.xlsx`, onToast)} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">خروجی گردش انبار</button></>}<button type="button" onClick={() => void reload()} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">{busy ? "در حال دریافت…" : "بروزرسانی"}</button></div></div>
+      <nav aria-label="بخش‌های انبار" role="tablist" className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1 sm:grid-cols-4">
+        {inventoryViews.map((view) => <button key={view.id} type="button" role="tab" aria-selected={inventoryView === view.id} onClick={() => setInventoryView(view.id)} className={`rounded-xl px-3 py-2 text-xs font-semibold transition ${inventoryView === view.id ? "bg-white text-teal-800 shadow-sm" : "text-slate-600 hover:bg-white/70"}`}>{view.label}</button>)}
+      </nav>
+      {inventoryView === "overview" && <div className="space-y-3">
       <div className={`${card} grid grid-cols-1 gap-4 xl:grid-cols-[minmax(280px,1fr)_2fr]`}>
         <form onSubmit={createWarehouse} className="space-y-2">
           <h4 className="text-xs font-bold">تعریف انبار جدید</h4>
@@ -452,13 +545,14 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         <div className="flex flex-wrap items-center gap-2"><select className={`${field} max-w-xs`} value={warehouseFilter} onChange={(event) => setWarehouseFilter(event.target.value)}><option value="">همهٔ انبارها</option>{warehouses.map((warehouse) => <option key={text(warehouse.id)} value={text(warehouse.id)}>{text(warehouse.name)}</option>)}</select><input className={`${field} max-w-sm`} value={stockSearch} onChange={(event) => setStockSearch(event.target.value)} placeholder="جستجوی کالا یا کد کالا"/></div>
         <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-right text-[11px]"><thead className="border-b bg-slate-50 text-slate-500"><tr><th className="p-2">انبار</th><th className="p-2">کالا / کد</th><th className="p-2">مقدار واقعی</th><th className="p-2">بهای میانگین</th><th className="p-2">ارزش موجودی</th></tr></thead><tbody>{rows(stock?.balances).filter((row) => (!warehouseFilter || text(row.warehouse_id) === warehouseFilter) && `${text(row.product_name)} ${text(row.product_sku)}`.toLowerCase().includes(stockSearch.trim().toLowerCase())).map((row, index) => <tr key={`${text(row.warehouse_id)}-${text(row.product_id)}-${text(row.variant_id, String(index))}`} className="border-b border-slate-100"><td className="p-2">{text(row.warehouse_name)}</td><td className="p-2">{text(row.product_name)} <span className="text-slate-400">{text(row.product_sku)}</span>{text(row.variant_name) && ` • ${text(row.variant_name)}`}</td><td className="p-2 font-semibold">{formatQty(text(row.on_hand_qty))}</td><td className="p-2">{formatIrr(text(row.avg_unit_cost))} ریال</td><td className="p-2">{formatIrr(text(row.total_value))} ریال</td></tr>)}</tbody></table>{!rows(stock?.balances).length && <div className="py-4 text-center text-xs text-slate-500">برای این کسب‌وکار گردش موجودی ثبت‌شده‌ای پیدا نشد.</div>}</div>
       </div>
-      <div className={`${card} space-y-3`}>
+      </div>}
+      {inventoryView === "operations" && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">اسناد رسید و حوالهٔ خروج</h4><div className="flex flex-wrap gap-2"><input className={`${field} max-w-xs`} placeholder="جستجوی شماره یا شرح سند" value={documentSearch} onChange={(event) => setDocumentSearch(event.target.value)}/><button type="button" onClick={() => setDocumentFilter("RECEIPT")} className={`rounded-lg px-3 py-1.5 text-xs ${documentFilter === "RECEIPT" ? "bg-teal-700 text-white" : "border"}`}>رسیدها ({receipts.length})</button><button type="button" onClick={() => setDocumentFilter("ISSUE")} className={`rounded-lg px-3 py-1.5 text-xs ${documentFilter === "ISSUE" ? "bg-teal-700 text-white" : "border"}`}>حواله‌های خروج ({issues.length})</button></div></div>
         <div className="max-h-56 space-y-2 overflow-auto">{shownStockDocuments.map((document) => <button key={text(document.id)} type="button" onClick={() => void openStockDocument(document, documentFilter === "RECEIPT" ? "receipts" : "issues")} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-right text-xs hover:bg-slate-50"><span><strong>{text(document.document_number, "سند انبار")}</strong> • {gregorianIsoToJalali(text(document.document_date))} • {text(document.reason ?? document.description)}</span><span className="rounded-full bg-slate-100 px-2 py-1">{text(document.status)}</span></button>)}{!shownStockDocuments.length && <div className="py-4 text-center text-xs text-slate-500">سندی مطابق جستجو پیدا نشد.</div>}</div>
         {selectedStockDocument && <div className="space-y-2 rounded-xl border border-teal-200 bg-teal-50/40 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">{text(selectedStockDocument.document_number)} • {gregorianIsoToJalali(text(selectedStockDocument.document_date))}</strong><div className="flex gap-2"><button type="button" onClick={printStockDocument} className="rounded-lg border px-3 py-1.5 text-xs">چاپ سند</button><button type="button" onClick={() => setSelectedStockDocument(null)} className="text-xs underline">بستن</button></div></div><div className="text-[11px]">{rows(selectedStockDocument.items).map((item) => `${text(item.product_name)}: ${formatQty(text(item.quantity))}`).join("، ")}</div></div>}
-      </div>
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <form onSubmit={createReceipt} className={`${card} space-y-3`}>
+      </div>}
+      <div className={inventoryView === "operations" || inventoryView === "transfers" ? "grid grid-cols-1 gap-4 xl:grid-cols-2" : "hidden"}>
+        {inventoryView === "operations" && <form onSubmit={createReceipt} className={`${card} space-y-3`}>
           <h4 className="text-xs font-bold">رسید ورود با بهای تمام‌شده</h4>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label><label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label><label className="text-[11px]">شماره فاکتور<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label><label className="text-[11px]">تاریخ فاکتور<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
           <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.3fr_1fr_.65fr_1fr]">{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, line.unit_price) }); })}{variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label="تعداد" required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/><input className={field} aria-label="قیمت واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/></div>)}</div>
@@ -466,46 +560,75 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
           <div className="grid grid-cols-2 gap-2 md:grid-cols-4">{([["shipping_cost", "هزینه حمل"], ["customs_and_extra_cost", "گمرک و سایر هزینه"], ["supplier_discount", "تخفیف"], ["paid_amount", "پرداخت‌شده"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>
           {Number(receipt.paid_amount) > 0 && <label className="block text-[11px]">پرداخت از حساب<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label>}
           <button className={button}>ثبت رسید و صدور سند موجودی</button>
-        </form>
-        <form onSubmit={createIssue} className={`${card} space-y-3`}>
+        </form>}
+        {inventoryView === "operations" && <form onSubmit={createIssue} className={`${card} space-y-3`}>
           <h4 className="text-xs font-bold">حواله خروج کالا از انبار</h4>
           <label className="block text-[11px]">انبار مبدأ{warehouseSelect(issue.warehouse_id, (value) => setIssue({ ...issue, warehouse_id: value }))}</label>
           <label className="block text-[11px]">تاریخ حواله شمسی<JalaliDatePicker className="mt-1" value={issue.document_date_jalali} onChange={(value) => setIssue({ ...issue, document_date_jalali: value })}/></label>
           {issueItems.map((line, index) => <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_1fr_.6fr_1fr]"><div>{lineSelect(line.product_id, (productId) => setIssueItems((items) => items.map((item, i) => i === index ? { ...item, product_id: productId, variant_id: "" } : item)))}{variantSelect(line.product_id, line.variant_id, (variantId) => setIssueItems((items) => items.map((item, i) => i === index ? { ...item, variant_id: variantId } : item)))}<span className="mt-1 block text-[10px] text-slate-500">موجودی این تنوع: {formatQty(availableQty(issue.warehouse_id, line.product_id, line.variant_id))}</span></div><input className={field} required dir="ltr" inputMode="decimal" aria-label="مقدار خروج" placeholder="تعداد" value={line.quantity} onChange={(event) => setIssueItems((items) => items.map((item, i) => i === index ? { ...item, quantity: event.target.value } : item))}/><input className={field} dir="ltr" inputMode="decimal" aria-label="بهای واحد خروج" placeholder="بهای واحد اختیاری" value={line.unit_cost} onChange={(event) => setIssueItems((items) => items.map((item, i) => i === index ? { ...item, unit_cost: event.target.value } : item))}/></div>)}
           <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setIssueItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "", unit_cost: "" }])}>افزودن قلم</button><input className={field} aria-label="شرح حواله خروج" value={issue.description} onChange={(event) => setIssue({ ...issue, description: event.target.value })}/><button className={button}>ثبت حواله خروج</button></div>
-        </form>
+        </form>}
         <div className="space-y-4">
-          <form onSubmit={settleSupplier} className={`${card} space-y-3`}>
+          {inventoryView === "operations" && <form onSubmit={settleSupplier} className={`${card} space-y-3`}>
             <h4 className="text-xs font-bold">تسویه بدهی تأمین‌کننده</h4>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><select className={field} required value={settlement.supplier_id} onChange={(event) => setSettlement({ ...settlement, supplier_id: event.target.value })}><option value="">تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select><select className={field} required value={settlement.financial_account_id} onChange={(event) => setSettlement({ ...settlement, financial_account_id: event.target.value })}><option value="">حساب پرداخت</option>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)}</option>)}</select><input className={field} required dir="ltr" inputMode="decimal" aria-label="مبلغ تسویه" value={settlement.amount} onChange={(event) => setSettlement({ ...settlement, amount: event.target.value })}/><JalaliDatePicker value={settlement.settlement_date_jalali} onChange={(value) => setSettlement({ ...settlement, settlement_date_jalali: value })}/></div>
             <div className="flex gap-2"><select className={field} value={settlement.payment_method} onChange={(event) => setSettlement({ ...settlement, payment_method: event.target.value })}><option value="BANK_TRANSFER">انتقال بانکی</option><option value="CASH">نقد</option><option value="BANK">بانک</option><option value="CARD_TERMINAL">کارت‌خوان</option><option value="CHEQUE">چک</option></select><input className={field} value={settlement.description} onChange={(event) => setSettlement({ ...settlement, description: event.target.value })}/><button className={button}>ثبت تسویه</button></div>
-          </form>
-          <form onSubmit={createTransfer} className={`${card} space-y-3`}>
+          </form>}
+          {inventoryView === "transfers" && <form onSubmit={createTransfer} className={`${card} space-y-3`}>
             <h4 className="text-xs font-bold">ایجاد حواله چندقلمی</h4>
             <div className="grid grid-cols-2 gap-2">{warehouseSelect(transferForm.source_warehouse_id, (value) => setTransferForm({ ...transferForm, source_warehouse_id: value, destination_warehouse_id: transferForm.destination_warehouse_id === value ? text(warehouses.find((item) => text(item.id) !== value)?.id) : transferForm.destination_warehouse_id }))}{warehouseSelect(transferForm.destination_warehouse_id, (value) => setTransferForm({ ...transferForm, destination_warehouse_id: value }))}</div>
             <label className="block text-[11px]">تاریخ حواله شمسی<JalaliDatePicker className="mt-1" value={transferForm.transfer_date_jalali} onChange={(value) => setTransferForm({ ...transferForm, transfer_date_jalali: value })}/></label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">مسئول انبار مبدأ<input className={field} required maxLength={140} value={transferForm.source_responsible_name} onChange={(event) => setTransferForm({ ...transferForm, source_responsible_name: event.target.value })} placeholder="نام تحویل‌دهنده"/></label><label className="text-[11px]">مسئول انبار مقصد<input className={field} required maxLength={140} value={transferForm.destination_responsible_name} onChange={(event) => setTransferForm({ ...transferForm, destination_responsible_name: event.target.value })} placeholder="نام تحویل‌گیرنده"/></label></div>
             {transferItems.map((line, index) => <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_1fr_.7fr]"><div>{lineSelect(line.product_id, (value) => setTransferItems((items) => items.map((item, i) => i === index ? { ...item, product_id: value, variant_id: "" } : item)))}{variantSelect(line.product_id, line.variant_id, (variantId) => setTransferItems((items) => items.map((item, i) => i === index ? { ...item, variant_id: variantId } : item)))}<span className="mt-1 block text-[10px] text-slate-500">موجودی مبدأ: {formatQty(availableQty(transferForm.source_warehouse_id, line.product_id, line.variant_id))}</span></div><input className={field} required dir="ltr" inputMode="decimal" aria-label="مقدار انتقال" value={line.quantity} onChange={(event) => setTransferItems((items) => items.map((item, i) => i === index ? { ...item, quantity: event.target.value } : item))}/></div>)}
-            <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setTransferItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "" }])}>افزودن کالا</button><input className={field} aria-label="شرح حواله" value={transferForm.reason} onChange={(event) => setTransferForm({ ...transferForm, reason: event.target.value })}/><button className={button}>ایجاد پیش‌نویس</button></div>
-          </form>
+            <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setTransferItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "" }])}>افزودن کالا</button><input className={field} aria-label="شرح حواله" value={transferForm.reason} onChange={(event) => setTransferForm({ ...transferForm, reason: event.target.value })}/><button disabled={transferPendingAction === "transfer:create"} className={button}>{transferPendingAction === "transfer:create" ? "در حال ثبت…" : "ایجاد پیش‌نویس"}</button></div>
+          </form>}
         </div>
       </div>
-      {supplierProfile && <div className={`${card} space-y-3`}>
+      {inventoryView === "operations" && supplierProfile && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">حساب تأمین‌کننده • {text((supplierProfile.supplier as Row | undefined)?.display_name)}</h4><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">مانده پرداختنی: {formatIrr(text((supplierProfile.summary as Row | undefined)?.outstanding_payable))} ریال</span></div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-xs"><div className="rounded-xl bg-slate-50 p-3">جمع فاکتورها<strong className="mt-1 block">{formatIrr(text((supplierProfile.summary as Row | undefined)?.total_billed_credit))} ریال</strong></div><div className="rounded-xl bg-emerald-50 p-3">جمع تسویه<strong className="mt-1 block">{formatIrr(text((supplierProfile.summary as Row | undefined)?.total_settled_debit))} ریال</strong></div><div className="rounded-xl bg-indigo-50 p-3">فاکتورهای خرید<strong className="mt-1 block">{text((supplierProfile.summary as Row | undefined)?.purchase_invoices_count, "0")}</strong></div><div className="rounded-xl bg-teal-50 p-3">رسیدهای انبار<strong className="mt-1 block">{text((supplierProfile.summary as Row | undefined)?.warehouse_receipts_count, "0")}</strong></div></div>
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2"><div className="max-h-44 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-[11px]">گردش دفتر حساب تأمین‌کننده</strong>{rows(supplierProfile.ledger_transactions).slice(0, 12).map((item, index) => <div key={text(item.id, String(index))} className="flex justify-between gap-2 border-b border-slate-100 py-1.5 text-[11px]"><span>{gregorianIsoToJalali(text(item.txDate ?? item.tx_date))} • {text(item.description)}</span><span className="tabular-nums">بد {formatIrr(text(item.debit))} / بس {formatIrr(text(item.credit))}</span></div>)}</div><div className="max-h-44 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-[11px]">پرداخت‌های خزانه‌ای ثبت‌شده</strong>{rows(supplierProfile.settlements).slice(0, 12).map((item, index) => <div key={text(item.id, String(index))} className="flex justify-between gap-2 border-b border-slate-100 py-1.5 text-[11px]"><span>{gregorianIsoToJalali(text(item.txDate ?? item.tx_date))} • {text(item.description)}</span><span className="tabular-nums">{formatIrr(text(item.amount))} ریال</span></div>)}</div></div>
       </div>}
-      <div className={`${card} space-y-3`}>
+      {inventoryView === "ledger" && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">کاردکس از دفتر گردش انبار</h4><span className="text-[10px] text-slate-500">{movements.length} گردش از سرور</span></div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">از تاریخ شمسی<JalaliDatePicker className="mt-1" value={movementDateFrom} onChange={(value) => setMovementDateFrom(value)} format="iso" placeholder="از تاریخ شمسی" allowEmpty/></label><label className="text-[11px]">تا تاریخ شمسی<JalaliDatePicker className="mt-1" value={movementDateTo} onChange={(value) => setMovementDateTo(value)} format="iso" placeholder="تا تاریخ شمسی" allowEmpty/></label></div>
         <div className="max-h-64 overflow-auto">{movements.filter((row) => `${text(row.document_number)} ${text(row.product_name)} ${text(row.product_sku)} ${text(row.variant_name)} ${text(row.variant_sku)}`.toLowerCase().includes(stockSearch.trim().toLowerCase())).slice(0, 100).map((row) => <div key={text(row.id)} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 py-2 text-[11px]"><span>{gregorianIsoToJalali(text(row.movement_date))} • {text(row.document_number)} • {text(row.warehouse_name)} / {text(row.product_name)}{text(row.variant_name) ? ` • ${text(row.variant_name)}` : ""}</span><span className="font-semibold tabular-nums">{Number(row.quantity_delta) >= 0 ? "+" : ""}{formatQty(text(row.quantity_delta))} ← مانده {formatQty(text(row.balance_after_qty))}</span></div>)}{!movements.length && <div className="py-3 text-xs text-slate-500">گردش انباری در سرور ثبت نشده است.</div>}</div>
-      </div>
-      <div className={`${card} space-y-3`}>
+      </div>}
+      {inventoryView === "transfers" && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">چرخه ارسال و تحویل حواله‌ها</h4><input className={`${field} max-w-sm`} value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="جستجوی شماره، انبار، کالا یا تنوع"/></div>
         <div className="space-y-2">{shownTransfers.slice(0, 100).map((transfer) => {
           const id = text(transfer.id); const status = text(transfer.status);
           const sourceName = text(transfer.source_warehouse_name, text(warehouses.find((warehouse) => text(warehouse.id) === text(transfer.source_warehouse_id))?.name, "مبدأ"));
           const destinationName = text(transfer.destination_warehouse_name, text(warehouses.find((warehouse) => text(warehouse.id) === text(transfer.destination_warehouse_id))?.name, "مقصد"));
-          return <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-xs"><div><strong>{text(transfer.transferNumber ?? transfer.transfer_number, "حواله")}</strong> — {sourceName} ← {destinationName} <span className="mx-1 rounded-full bg-slate-100 px-2 py-0.5">{status}</span><div className="mt-1 text-slate-500">{rows(transfer.items).map((item) => `${text(item.product_name)}${text(item.variant_name) ? ` • ${text(item.variant_name)}` : ""}: ${formatQty(text(item.quantitySent ?? item.quantity_sent ?? item.quantity))}`).join("، ")}</div></div><div className="flex flex-wrap gap-1.5">{status === "DRAFT" && <button className="rounded-lg border px-2 py-1" type="button" onClick={() => void transferAction(id, "submit")}>تأیید حواله</button>}{status === "SUBMITTED" && <button className="rounded-lg bg-indigo-600 px-2 py-1 text-white" type="button" onClick={() => void transferAction(id, "dispatch")}>ارسال از مبدأ</button>}{["IN_TRANSIT", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button className="rounded-lg bg-emerald-700 px-2 py-1 text-white" type="button" onClick={() => openReceive(transfer)}>ثبت تحویل مقصد</button>}{["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button className="rounded-lg border px-2 py-1" type="button" onClick={() => void transferAction(id, "complete")}>تکمیل حواله</button>}</div></div>;
+          return (
+            <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-xs">
+              <div className="min-w-0">
+                <strong>{text(transfer.transferNumber ?? transfer.transfer_number, "حواله")}</strong>
+                {" — "}{sourceName} ← {destinationName}
+                <span className="mx-1 rounded-full bg-slate-100 px-2 py-0.5">{transferStatusLabels[status] ?? status}</span>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
+                  {rows(transfer.items).map((item, index) => (
+                    <span key={text(item.id, String(index))}>
+                      {text(item.product_name ?? item.productName)}
+                      {text(item.variant_name ?? item.variantName) ? " • " + text(item.variant_name ?? item.variantName) : ""}
+                      {": "}{formatQty(text(item.quantitySent ?? item.quantity_sent ?? item.quantity))}
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-1 text-[10px] text-slate-500">
+                  مسئول مبدأ: {text(transfer.sourceResponsibleName ?? transfer.source_responsible_name, "—")}
+                  {" · "}مسئول مقصد: {text(transfer.destinationResponsibleName ?? transfer.destination_responsible_name, "—")}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button className="rounded-lg border px-2 py-1" type="button" onClick={() => printTransfer(transfer)}>چاپ حواله</button>
+                {status === "DRAFT" && <button disabled={transferPendingAction === "transfer:" + id + ":submit"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "submit")}>تأیید حواله</button>}
+                {status === "SUBMITTED" && <button disabled={transferPendingAction === "transfer:" + id + ":dispatch"} className="rounded-lg bg-indigo-600 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => void transferAction(id, "dispatch")}>ارسال از مبدأ</button>}
+                {["IN_TRANSIT", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":receive"} className="rounded-lg bg-emerald-700 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => openReceive(transfer)}>ثبت تحویل مقصد</button>}
+                {["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":complete"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "complete")}>تکمیل حواله</button>}
+              </div>
+            </div>
+          );
         })}{!shownTransfers.length && <div className="text-xs text-slate-500">حواله‌ای مطابق جستجو پیدا نشد.</div>}</div>
         {selectedTransfer && <form onSubmit={receiveTransfer} className="space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
           <div className="flex items-center justify-between"><strong className="text-xs">تحویل حواله {text(selectedTransfer.transferNumber ?? selectedTransfer.transfer_number)}</strong><button type="button" className="text-xs underline" onClick={() => setSelectedTransfer(null)}>بستن</button></div>
@@ -513,7 +636,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
           <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-right text-[11px]"><thead><tr><th className="p-2">کالا</th><th className="p-2">پذیرفته</th><th className="p-2">کسری</th><th className="p-2">آسیب</th><th className="p-2">رد کیفیت</th><th className="p-2">شرح اختلاف</th></tr></thead><tbody>{receiveLines.map((line, index) => { const transferItem = rows(selectedTransfer.items).find((item) => text(item.id) === line.transfer_item_id); return <tr key={line.transfer_item_id}><td className="p-2">{text(transferItem?.product_name)}{text(transferItem?.variant_name) ? ` • ${text(transferItem?.variant_name)}` : ""}</td>{(["accepted_quantity", "missing_qty", "damaged_qty", "rejected_quantity"] as const).map((key) => <td key={key} className="p-1"><input className="w-24 rounded-lg border px-2 py-1 text-left" dir="ltr" inputMode="decimal" value={line[key]} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, [key]: event.target.value } : item))}/></td>)}<td className="p-1"><input className="w-36 rounded-lg border px-2 py-1" value={line.discrepancy_description} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, discrepancy_description: event.target.value } : item))}/></td></tr>; })}</tbody></table></div>
           <button className={button}>ثبت مقادیر تحویل و اختلاف</button>
         </form>}
-      </div>
+      </div>}
     </section>
   );
 }

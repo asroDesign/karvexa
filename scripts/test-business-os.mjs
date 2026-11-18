@@ -2589,28 +2589,72 @@ async function run() {
   assert.equal(chqStaleVer.json.error.code, "VERSION_CONFLICT");
   console.log("[PASS] Prompt 09A-1: Settlement FKs (cheque_id/contact_id), Supplier /account|/transactions|/settlements, PUT Treasury & Cheque Version Guard verified");
 
-  // P09A-2: Warehouse Transfer Explicit DRAFT -> /submit (SUBMITTED) -> Idempotent /dispatch (IN_TRANSIT) -> Idempotent /receive (discrepancy_type + rejected_quantity) + /exports/transactions
+  // P09A-2: Tenant-safe, idempotent transfer creation and locked transfer lifecycle.
   const rollProd = prods.find((p) => p.code === "CON-ROLL-80") || prods[0];
-  const trDraftRes = await req("/api/v1/inventory/transfers", {
+  const unownedWarehouseTransfer = await req("/api/v1/inventory/transfers", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
     body: {
       source_warehouse_id: whs[0].id,
-      destination_warehouse_id: whs[1].id,
-      reason: "تست چرخه کامل Prompt 09A",
-      source_responsible_name: "انباردار ۱",
-      destination_responsible_name: "انباردار ۲",
-      dispatch_immediately: false,
-      items: [{ product_id: rollProd.id, quantity: "3.0000" }],
+      destination_warehouse_id: cryptoMod.randomUUID(),
+      reason: "تست محدودیت انبار سازمان",
+      source_responsible_name: "انباردار مبدأ",
+      destination_responsible_name: "انباردار مقصد",
+      items: [{ product_id: rollProd.id, quantity: "1.0000" }],
     },
+  });
+  assert.equal(unownedWarehouseTransfer.status, 404, "A transfer must reject a warehouse outside the organization");
+
+  const tr09CreateKey = cryptoMod.randomUUID();
+  const tr09CreateBody = {
+    source_warehouse_id: whs[0].id,
+    destination_warehouse_id: whs[1].id,
+    reason: "تست چرخه کامل Prompt 09A",
+    source_responsible_name: "انباردار ۱",
+    destination_responsible_name: "انباردار ۲",
+    dispatch_immediately: false,
+    items: [{ product_id: rollProd.id, quantity: "3.0000" }],
+  };
+  const trDraftRes = await req("/api/v1/inventory/transfers", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    headers: { "Idempotency-Key": tr09CreateKey },
+    body: tr09CreateBody,
   });
   assert.equal(trDraftRes.status, 201);
   assert.equal(trDraftRes.json.data.transfer.status, "DRAFT");
   const tr09Id = trDraftRes.json.data.transfer.id;
   const tr09ItemId = trDraftRes.json.data.items[0].id;
+  const trDraftReplay = await req("/api/v1/inventory/transfers", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    headers: { "Idempotency-Key": tr09CreateKey },
+    body: tr09CreateBody,
+  });
+  assert.equal(trDraftReplay.json.meta.replayed, true, "Duplicate transfer creation MUST be idempotent");
+  assert.equal(trDraftReplay.json.data.transfer.id, tr09Id);
 
-  const trSubRes = await req(`/api/v1/inventory/transfers/${tr09Id}/submit`, {
+  const cancelDraft = await req("/api/v1/inventory/transfers", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    headers: { "Idempotency-Key": cryptoMod.randomUUID() },
+    body: { ...tr09CreateBody, items: [{ product_id: rollProd.id, quantity: "1.0000" }] },
+  });
+  assert.equal(cancelDraft.status, 201);
+  const cancelTransferDraftRes = await req("/api/v1/inventory/transfers/" + cancelDraft.json.data.transfer.id + "/cancel", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    body: { reason: "لغو پیش از خروج کالا" },
+  });
+  assert.equal(cancelTransferDraftRes.status, 200);
+  assert.equal(cancelTransferDraftRes.json.data.status, "CANCELLED");
+
+  const trSubRes = await req("/api/v1/inventory/transfers/" + tr09Id + "/submit", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
@@ -2620,7 +2664,7 @@ async function run() {
   assert.equal(trSubRes.json.data.status, "SUBMITTED");
 
   const dispKey = cryptoMod.randomUUID();
-  const trDisp1 = await req(`/api/v1/inventory/transfers/${tr09Id}/dispatch`, {
+  const trDisp1 = await req("/api/v1/inventory/transfers/" + tr09Id + "/dispatch", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
@@ -2629,7 +2673,7 @@ async function run() {
   });
   assert.equal(trDisp1.status, 200);
   assert.equal(trDisp1.json.data.transfer.status, "IN_TRANSIT");
-  const trDispReplay = await req(`/api/v1/inventory/transfers/${tr09Id}/dispatch`, {
+  const trDispReplay = await req("/api/v1/inventory/transfers/" + tr09Id + "/dispatch", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
@@ -2638,20 +2682,54 @@ async function run() {
   });
   assert.equal(trDispReplay.json.meta.replayed, true, "Duplicate dispatch MUST be idempotent");
 
+  const cancelInTransit = await req("/api/v1/inventory/transfers/" + tr09Id + "/cancel", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    body: { reason: "نباید پس از خروج باطل شود" },
+  });
+  assert.equal(cancelInTransit.status, 409, "A dispatched transfer cannot be cancelled without a reversal document");
+  assert.equal(cancelInTransit.json.error.code, "TRANSFER_CANNOT_CANCEL");
+
+  const partialRecvKey = cryptoMod.randomUUID();
+  const partialRecvBody = {
+    items: [{
+      transfer_item_id: tr09ItemId,
+      product_id: rollProd.id,
+      accepted_quantity: "1.0000",
+    }],
+  };
+  const trPartialRecv = await req("/api/v1/inventory/transfers/" + tr09Id + "/receive", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    headers: { "Idempotency-Key": partialRecvKey },
+    body: partialRecvBody,
+  });
+  assert.equal(trPartialRecv.status, 200);
+  assert.equal(trPartialRecv.json.data.transfer.status, "PARTIALLY_RECEIVED");
+
+  const prematureComplete = await req("/api/v1/inventory/transfers/" + tr09Id + "/complete", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    body: {},
+  });
+  assert.equal(prematureComplete.status, 409, "A partial transfer must remain open until all quantities are accounted for");
+  assert.equal(prematureComplete.json.error.code, "TRANSFER_CANNOT_COMPLETE");
+
   const recvKey = cryptoMod.randomUUID();
   const recvBody = {
-    items: [
-      {
-        transfer_item_id: tr09ItemId,
-        product_id: rollProd.id,
-        accepted_quantity: "2.0000",
-        rejected_quantity: "1.0000",
-        discrepancy_type: "QUALITY_REJECTED",
-        discrepancy_description: "آسیب رطوبت در ۱ بسته",
-      },
-    ],
+    items: [{
+      transfer_item_id: tr09ItemId,
+      product_id: rollProd.id,
+      accepted_quantity: "1.0000",
+      rejected_quantity: "1.0000",
+      discrepancy_type: "QUALITY_REJECTED",
+      discrepancy_description: "آسیب رطوبت در ۱ بسته",
+    }],
   };
-  const trRecv1 = await req(`/api/v1/inventory/transfers/${tr09Id}/receive`, {
+  const trRecv1 = await req("/api/v1/inventory/transfers/" + tr09Id + "/receive", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
@@ -2659,10 +2737,12 @@ async function run() {
     body: recvBody,
   });
   assert.equal(trRecv1.status, 200);
+  assert.equal(trRecv1.json.data.transfer.status, "DISCREPANCY_REPORTED");
   assert.equal(trRecv1.json.data.items[0].discrepancy_type, "QUALITY_REJECTED");
+  assert.equal(trRecv1.json.data.items[0].quantity_accepted, "2.0000");
   assert.equal(trRecv1.json.data.items[0].quantity_rejected, "1.0000");
 
-  const trRecvReplay = await req(`/api/v1/inventory/transfers/${tr09Id}/receive`, {
+  const trRecvReplay = await req("/api/v1/inventory/transfers/" + tr09Id + "/receive", {
     method: "POST",
     token: tokenAdmin,
     orgId: parsOrgId,
@@ -2670,6 +2750,15 @@ async function run() {
     body: recvBody,
   });
   assert.equal(trRecvReplay.json.meta.replayed, true, "Duplicate receive MUST be idempotent");
+
+  const trComplete = await req("/api/v1/inventory/transfers/" + tr09Id + "/complete", {
+    method: "POST",
+    token: tokenAdmin,
+    orgId: parsOrgId,
+    body: {},
+  });
+  assert.equal(trComplete.status, 200);
+  assert.equal(trComplete.json.data.status, "COMPLETED");
 
   const txExportAlias = await fetch(`${BASE}/api/v1/inventory/exports/transactions?warehouse_id=${whs[0].id}`, {
     headers: { Authorization: `Bearer ${tokenAdmin}`, "X-Organization-Id": parsOrgId, "X-Client-Version": "1.0.0" },

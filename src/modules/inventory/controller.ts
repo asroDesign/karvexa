@@ -32,6 +32,7 @@ import {
   postStockDocumentTx,
 } from "@/modules/inventory/service";
 import {
+  cancelMultiItemTransfer,
   completeWarehouseTransfer,
   createLandedWarehouseReceipt,
   createMultiItemTransfer,
@@ -637,6 +638,16 @@ export async function handleWarehouseAndInventoryRoutes(
             })
             .parse(raw);
 
+          const idemKey = req.headers.get("idempotency-key");
+          const endpoint = "/api/v1/inventory/transfers";
+          const cached = await checkIdempotency({
+            organizationId: ctx.organizationId,
+            key: idemKey,
+            endpoint,
+            payload: multiBody,
+          });
+          if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
+
           const res = await createMultiItemTransfer({
             organizationId: ctx.organizationId,
             sourceWarehouseId: multiBody.source_warehouse_id,
@@ -652,6 +663,14 @@ export async function handleWarehouseAndInventoryRoutes(
             actorEmail: ctx.email,
             ipAddress: ctx.ipAddress,
             items: multiBody.items,
+          });
+          await saveIdempotency({
+            organizationId: ctx.organizationId,
+            key: idemKey,
+            endpoint,
+            payload: multiBody,
+            statusCode: 201,
+            responseBody: res as unknown as Record<string, unknown>,
           });
           return ok(res, 201);
         }
@@ -797,13 +816,20 @@ export async function handleWarehouseAndInventoryRoutes(
           );
         }
         if (method === "POST" && seg3 === "cancel") {
-          await requireOrgContext(req, "inventory.transfers.create", { requireActiveSubscription: true });
-          const [upd] = await db
-            .update(stockTransfers)
-            .set({ status: "CANCELLED" })
-            .where(and(eq(stockTransfers.id, seg2), eq(stockTransfers.organizationId, ctx.organizationId)))
-            .returning();
-          return ok(upd);
+          const cancelCtx = await requireOrgContext(req, "inventory.transfers.create", { requireActiveSubscription: true });
+          const cancelBody = z
+            .object({ reason: z.string().trim().max(500).optional() })
+            .parse(await req.json());
+          return ok(
+            await cancelMultiItemTransfer({
+              organizationId: cancelCtx.organizationId,
+              transferId: seg2,
+              reason: cancelBody.reason ?? "",
+              actorUserId: cancelCtx.userId,
+              actorEmail: cancelCtx.email,
+              ipAddress: cancelCtx.ipAddress,
+            })
+          );
         }
       }
     }
