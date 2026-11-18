@@ -17,6 +17,7 @@ DECLARE
     'financial_accounts', 'cashboxes', 'financial_transactions', 'bank_reconciliations',
     'cheques', 'cheque_events', 'cheque_assignments',
     'consignment_documents', 'consignment_items', 'consignor_settlements',
+    'support_tickets', 'support_ticket_messages', 'support_ticket_events',
     'devices', 'sync_batches', 'sync_events', 'sync_conflicts', 'sync_checkpoints',
     'sync_inbox', 'sync_change_log', 'sync_logs',
     'subscriptions', 'entitlements', 'payment_transactions', 'purchase_receipts',

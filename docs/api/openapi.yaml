@@ -609,7 +609,7 @@ paths:
   /subscription/orders/{reference}:
     get: { summary: Verify authoritative order status & signed versioned entitlement snapshot after Android App Link return, parameters: [{ name: reference, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Order and signed entitlements } } }
   /payments/callback/{gateway}:
-    get: { summary: Server-side gateway callback verification (Zarinpal/Zibal/Balleh Pay/Saman) with duplicate-callback protection & App Link redirect, security: [], parameters: [{ name: gateway, in: path, required: true, schema: { type: string, enum: [zarinpal, zibal, balleh_pay, saman] } }], responses: { '200': { description: Verified JSON }, '302': { description: Redirect to /payments/result/{reference} } } }
+    get: { summary: Server-side gateway callback verification (Zarinpal/Zibal/Balleh Pay/Saman) with duplicate-callback protection & App Link redirect, security: [], parameters: [{ name: gateway, in: path, required: true, schema: { type: string, enum: [zarinpal, zibal, balleh_pay, saman] } }], responses: { '200': { description: Verified JSON }, '302': { description: 'Redirect to /payments/result/{reference}' } } }
   /platform/payment-gateways:
     get: { summary: Platform Admin view of all 4 payment gateway adapters (masked secrets, priority) & recent orders, responses: { '200': { description: Gateways } } }
     patch: { summary: Platform Admin update gateway credentials, priority, active/default flags & sandbox mode, responses: { '200': { description: Updated } } }
@@ -637,5 +637,19 @@ paths:
     get: { summary: Lightweight pull-fallback entitlement version check for Android sync, responses: { '200': { description: Version } } }
   /subscriptions/upgrade:
     post: { summary: Initiate subscription plan upgrade order through priority-ordered active gateway, responses: { '201': { description: Upgrade order } } }
+  /support/tickets:
+    get: { summary: List tickets owned by the authenticated organization user and active support departments, parameters: [{ $ref: '#/components/parameters/OrganizationIdHeader' }], responses: { '200': { description: Customer tickets and departments } } }
+    post: { summary: Create a support ticket with its first public message, department, and priority, parameters: [{ $ref: '#/components/parameters/OrganizationIdHeader' }], responses: { '201': { description: Ticket created } } }
+  /support/tickets/{id}:
+    get: { summary: Read an owned ticket, public messages, and customer-visible status history; internal notes are excluded, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: '#/components/parameters/OrganizationIdHeader' }], responses: { '200': { description: Ticket detail } } }
+  /support/tickets/{id}/messages:
+    post: { summary: Add a public customer reply and reopen a resolved ticket, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: '#/components/parameters/OrganizationIdHeader' }], responses: { '201': { description: Reply added }, '409': { description: Ticket is closed } } }
+  /platform/tickets:
+    get: { summary: List platform support tickets with organizations, departments, and active agents, responses: { '200': { description: Ticket queue } } }
+  /platform/tickets/{id}:
+    get: { summary: Read ticket conversation including admin-only internal notes and action history, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Admin ticket detail } } }
+    patch: { summary: Change status, priority, department routing, assigned agent, or resolution note, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: Ticket updated } } }
+  /platform/tickets/{id}/messages:
+    post: { summary: Send a customer-visible reply or an admin-only internal note, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '201': { description: Message or internal note added } } }
   /subscriptions/payments/{id}:
     get: { summary: Query authoritative payment transaction or upgrade order by UUID or opaque payment reference, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Payment & entitlements } } }

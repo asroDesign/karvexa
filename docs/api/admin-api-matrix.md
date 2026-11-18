@@ -17,7 +17,7 @@ Requires `is_platform_admin = true` + platform-scoped RBAC permission:
 | Audit Trail | `GET /api/v1/platform/audit-logs` | `platform.audit.read` |
 | Error Reports | `GET/PATCH /api/v1/platform/error-logs` | `platform.errors.read/resolve` |
 | Platform Settings | `GET/PATCH /api/v1/platform/settings` | `platform.settings.manage` |
-| Support Tickets | `GET/PATCH /api/v1/platform/tickets` | `platform.tickets.manage` |
+| Support Ticket Desk | `GET /api/v1/platform/tickets`, `GET/PATCH /api/v1/platform/tickets/{id}`, `POST /api/v1/platform/tickets/{id}/messages` | `platform.tickets.manage` |
 | API Contract Explorer | `GET /api/v1/docs` | Platform / Auth |
 
 ## 2. Organization Workspace Realm (`/api/v1/*`)
@@ -34,3 +34,4 @@ Requires verified `organization_members` (`ACTIVE`) + org-scoped RBAC permission
 | Treasury, Cheques, Consignment | `GET/POST /api/v1/treasury/*`, `/cheques/*`, `/consignments/*` | `treasury.*`, `cheques.*`, `consignments.*` |
 | Subscription & Data Export | `GET /api/v1/subscription/current`, `/plans`, `POST /api/v1/subscription/market/verify`, `/restore`, `GET /api/v1/export` | `subscription.manage`, `reports.export` |
 | Offline Sync Simulator | `POST /api/v1/sync/push`, `GET /api/v1/sync/pull`, `GET /api/v1/sync/conflicts`, `POST /api/v1/sync/conflicts/{id}/resolve` | `sync.execute` |
+| Business Support Tickets | `GET/POST /api/v1/support/tickets`, `GET /api/v1/support/tickets/{id}`, `POST /api/v1/support/tickets/{id}/messages` | Active organization membership |

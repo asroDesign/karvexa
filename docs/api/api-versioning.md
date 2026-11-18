@@ -12,6 +12,11 @@
 ---
 
 ## Change Log
+### v1 additive update (2026-11-18) — Advanced Support Tickets
+- Added organization-scoped ticket creation, replies, and public conversation history.
+- Added platform ticket queue, routing to departments and agents, status/priority controls, internal notes, and action history.
+- Enforced ticket thread tenant isolation with PostgreSQL RLS and documented all new endpoints in OpenAPI.
+
 ### v1.0.0 (2026-04-01) — Central Implementation Contract Release
 - Standardized strict `snake_case` JSON naming and Decimal String precision across all 18 domain modules.
 - Enforced unified Response Envelope (`success`, `data`, `meta.request_id`, `meta.timestamp`, `meta.pagination`, `error.details[]`).

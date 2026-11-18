@@ -1,68 +1,50 @@
+import { desc, eq, sql } from "drizzle-orm";
 import { NextRequest } from "next/server";
-import { desc, eq } from "drizzle-orm";
-import { z } from "zod";
 import { db } from "@/db";
-import { organizations, supportTickets, users } from "@/db/schema";
-import { recordAuditLog } from "@/lib/audit";
+import { organizations, supportTicketDepartments, supportTickets, users } from "@/db/schema";
 import { handleApiError, ok } from "@/lib/errors";
-import { requirePlatformAdmin } from "@/lib/tenant";
-
-const patchTicketSchema = z.object({
-  id: z.string().uuid(),
-  status: z.enum(["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"]),
-  resolutionNote: z.string().optional(),
-});
+import { requirePlatformAdmin, withPlatformTransaction } from "@/lib/tenant";
 
 export async function GET(req: NextRequest) {
   try {
     await requirePlatformAdmin(req, "platform.tickets.manage");
-
-    const tickets = await db
-      .select({
+    const { rows, departments, agents } = await withPlatformTransaction(async (tx) => {
+      const [rows, departments, agents] = await Promise.all([
+      tx.select({
         ticket: supportTickets,
         orgName: organizations.name,
         userFullName: users.fullName,
         userEmail: users.email,
+        departmentName: supportTicketDepartments.name,
       })
-      .from(supportTickets)
-      .leftJoin(organizations, eq(supportTickets.organizationId, organizations.id))
-      .leftJoin(users, eq(supportTickets.userId, users.id))
-      .orderBy(desc(supportTickets.createdAt));
-
-    return ok({ tickets });
-  } catch (err) {
-    return handleApiError(err);
-  }
-}
-
-export async function PATCH(req: NextRequest) {
-  try {
-    const admin = await requirePlatformAdmin(req, "platform.tickets.manage");
-    const body = patchTicketSchema.parse(await req.json());
-
-    const [updated] = await db
-      .update(supportTickets)
-      .set({
-        status: body.status,
-        ...(body.resolutionNote !== undefined ? { resolutionNote: body.resolutionNote } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(supportTickets.id, body.id))
-      .returning();
-
-    await recordAuditLog({
-      organizationId: updated?.organizationId ?? null,
-      actorUserId: admin.userId,
-      actorEmail: admin.email,
-      scope: "PLATFORM",
-      action: "SUPPORT_TICKET_UPDATED",
-      entityType: "SUPPORT_TICKET",
-      entityId: body.id,
-      ipAddress: admin.ipAddress,
-      metadata: { status: body.status },
+        .from(supportTickets)
+        .leftJoin(organizations, eq(supportTickets.organizationId, organizations.id))
+        .leftJoin(users, eq(supportTickets.userId, users.id))
+        .leftJoin(supportTicketDepartments, eq(supportTickets.departmentId, supportTicketDepartments.id))
+        .orderBy(desc(supportTickets.lastActivityAt))
+        .limit(300),
+      tx.select({ id: supportTicketDepartments.id, code: supportTicketDepartments.code, name: supportTicketDepartments.name })
+        .from(supportTicketDepartments)
+        .where(eq(supportTicketDepartments.isActive, true))
+        .orderBy(supportTicketDepartments.sortOrder, supportTicketDepartments.name),
+      tx.select({ id: users.id, fullName: users.fullName, email: users.email })
+        .from(users)
+        .where(sql`${users.isPlatformAdmin} = true AND ${users.status} = 'ACTIVE'`)
+        .orderBy(users.fullName),
+      ]);
+      return { rows, departments, agents };
     });
-
-    return ok({ ticket: updated });
+    return ok({
+      tickets: rows.map(({ ticket, orgName, userFullName, userEmail, departmentName }) => ({
+        ticket,
+        orgName,
+        userFullName,
+        userEmail,
+        departmentName,
+      })),
+      departments,
+      agents,
+    });
   } catch (err) {
     return handleApiError(err);
   }

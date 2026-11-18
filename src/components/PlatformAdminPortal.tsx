@@ -30,6 +30,7 @@ import {
   formatIrr,
 } from "@/lib/format";
 import { PlatformSaasAdmin } from "./PlatformSaasAdmin";
+import { PlatformTicketDesk } from "./PlatformTicketDesk";
 
 type PlatformTab =
   | "overview"
@@ -87,7 +88,6 @@ export function PlatformAdminPortal({ onToast }: PlatformAdminPortalProps) {
   const [auditLogs, setAuditLogs] = useState<Array<Record<string, unknown>>>([]);
   const [errorLogs, setErrorLogs] = useState<Array<Record<string, unknown>>>([]);
   const [settingsList, setSettingsList] = useState<Array<Record<string, unknown>>>([]);
-  const [ticketsList, setTicketsList] = useState<Array<Record<string, unknown>>>([]);
   const [docsList, setDocsList] = useState<Array<{ key: string; title_fa: string; path: string; content: string }>>([]);
   const [selectedDocKey, setSelectedDocKey] = useState("openapi");
 
@@ -161,9 +161,6 @@ export function PlatformAdminPortal({ onToast }: PlatformAdminPortalProps) {
         } else if (activeTab === "settings") {
           const data = await apiFetch<{ settings: Array<Record<string, unknown>> }>("/api/v1/platform/settings");
           setSettingsList(data.settings);
-        } else if (activeTab === "tickets") {
-          const data = await apiFetch<{ tickets: Array<Record<string, unknown>> }>("/api/v1/platform/tickets");
-          setTicketsList(data.tickets);
         } else if (activeTab === "contracts") {
           const data = await apiFetch<{ docs: Array<{ key: string; title_fa: string; path: string; content: string }> }>("/api/v1/docs");
           setDocsList(data.docs);
@@ -269,23 +266,6 @@ export function PlatformAdminPortal({ onToast }: PlatformAdminPortalProps) {
       loadTab("errors");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در به‌روزرسانی", "error");
-    }
-  }
-
-  async function updateTicketStatus(id: string, status: "IN_PROGRESS" | "RESOLVED") {
-    try {
-      await apiFetch("/api/v1/platform/tickets", {
-        method: "PATCH",
-        body: JSON.stringify({
-          id,
-          status,
-          resolutionNote: status === "RESOLVED" ? "بررسی و توسط تیم پشتیبانی پلتفرم برطرف شد." : undefined,
-        }),
-      });
-      onToast("وضعیت تیکت پشتیبانی به‌روزرسانی شد.");
-      loadTab("tickets");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در به‌روزرسانی تیکت", "error");
     }
   }
 
@@ -1290,55 +1270,7 @@ export function PlatformAdminPortal({ onToast }: PlatformAdminPortalProps) {
         )}
 
         {/* 11. SUPPORT TICKETS */}
-        {tab === "tickets" && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
-            {ticketsList.map((row, idx) => {
-              const t = row.ticket as Record<string, unknown>;
-              return (
-                <div key={idx} className="rounded-xl border border-slate-200 p-4 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="font-bold text-slate-900">
-                      <span className="font-mono text-indigo-600 ml-2">{String(t.ticket_number)}</span>
-                      {String(t.subject)}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-700">
-                        اولویت: {String(t.priority)}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700">
-                        {String(t.status)}
-                      </span>
-                    </div>
-                  </div>
-                  <p className="text-slate-600 mt-2">{String(t.description)}</p>
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
-                    <span>
-                      سازمان: {String(row.org_name || "—")} • کاربر: {String(row.user_full_name || "—")}
-                    </span>
-                    {t.status !== "RESOLVED" && (
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => updateTicketStatus(String(t.id), "IN_PROGRESS")}
-                          className="rounded-lg border border-slate-200 px-3 py-1 text-slate-700 cursor-pointer"
-                        >
-                          در حال بررسی
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateTicketStatus(String(t.id), "RESOLVED")}
-                          className="rounded-lg bg-emerald-600 text-white px-3 py-1 cursor-pointer"
-                        >
-                          علامت حل‌شده
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        {tab === "tickets" && <PlatformTicketDesk onToast={onToast} />}
 
         {/* 12. CONTRACTS & OPENAPI EXPLORER */}
         {tab === "contracts" && (

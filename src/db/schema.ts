@@ -2014,6 +2014,20 @@ export const userInvitations = pgTable(
   ]
 );
 
+export const supportTicketDepartments = pgTable(
+  "support_ticket_departments",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    code: varchar("code", { length: 48 }).notNull(),
+    name: varchar("name", { length: 100 }).notNull(),
+    description: varchar("description", { length: 300 }),
+    isActive: boolean("is_active").notNull().default(true),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("uq_support_ticket_departments_code").on(t.code), index("idx_support_ticket_departments_active_order").on(t.isActive, t.sortOrder)]
+);
+
 export const supportTickets = pgTable(
   "support_tickets",
   {
@@ -2023,13 +2037,53 @@ export const supportTickets = pgTable(
     ticketNumber: varchar("ticket_number", { length: 32 }).notNull(),
     subject: varchar("subject", { length: 200 }).notNull(),
     description: text("description").notNull(),
+    departmentId: uuid("department_id").references(() => supportTicketDepartments.id, { onDelete: "set null" }),
+    assignedToUserId: uuid("assigned_to_user_id").references(() => users.id, { onDelete: "set null" }),
     priority: varchar("priority", { length: 20 }).notNull().default("MEDIUM"), // LOW | MEDIUM | HIGH | URGENT
-    status: varchar("status", { length: 24 }).notNull().default("OPEN"), // OPEN | IN_PROGRESS | RESOLVED | CLOSED
+    status: varchar("status", { length: 24 }).notNull().default("OPEN"), // OPEN | IN_PROGRESS | WAITING_CUSTOMER | WAITING_AGENT | RESOLVED | CLOSED
     resolutionNote: text("resolution_note"),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).defaultNow().notNull(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("uq_tickets_number").on(t.ticketNumber)]
+  (t) => [
+    uniqueIndex("uq_tickets_number").on(t.ticketNumber),
+    index("idx_support_tickets_org_activity").on(t.organizationId, t.lastActivityAt),
+    index("idx_support_tickets_status_activity").on(t.status, t.lastActivityAt),
+    index("idx_support_tickets_department_activity").on(t.departmentId, t.lastActivityAt),
+  ]
+);
+
+export const supportTicketMessages = pgTable(
+  "support_ticket_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id, { onDelete: "cascade" }),
+    senderUserId: uuid("sender_user_id").references(() => users.id, { onDelete: "set null" }),
+    senderType: varchar("sender_type", { length: 16 }).notNull(), // CUSTOMER | ADMIN
+    senderName: varchar("sender_name", { length: 200 }).notNull(),
+    body: text("body").notNull(),
+    isInternal: boolean("is_internal").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_support_ticket_messages_ticket_created").on(t.ticketId, t.createdAt)]
+);
+
+export const supportTicketEvents = pgTable(
+  "support_ticket_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    actorName: varchar("actor_name", { length: 200 }).notNull(),
+    eventType: varchar("event_type", { length: 48 }).notNull(),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_support_ticket_events_ticket_created").on(t.ticketId, t.createdAt)]
 );
 
 export const platformSettings = pgTable(

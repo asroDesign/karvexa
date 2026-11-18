@@ -21,6 +21,7 @@ import {
   AlertTriangle,
   Lock,
   ScanBarcode,
+  LifeBuoy,
 } from "lucide-react";
 import {
   apiFetch,
@@ -36,6 +37,7 @@ import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
 import { GlassDashboard } from "./GlassDashboard";
 import { UserAccessSettings } from "./UserAccessSettings";
 import { FiscalLifecyclePanel } from "./FiscalLifecyclePanel";
+import { BusinessSupportTickets } from "./BusinessSupportTickets";
 import { AccountingParityPanel, CommerceParityPanel, InventoryParityPanel, TreasuryParityPanel } from "./BusinessParityPanels";
 import { Award, BarChart3, CalendarRange, Settings, Sparkles, Wallet, Zap } from "lucide-react";
 
@@ -56,7 +58,8 @@ type OrgTab =
   | "cheque_analytics"
   | "settings_access"
   | "subscription"
-  | "sync";
+  | "sync"
+  | "support";
 
 interface OrgWorkspaceProps {
   session: SessionMeResponse;
@@ -91,11 +94,13 @@ const ORG_TABS: Array<{ id: OrgTab; label: string; icon: React.ComponentType<{ c
   { id: "settings_access", label: "تنظیمات، تم و دسترسی کاربران", icon: Settings },
   { id: "subscription", label: "اشتراک کافه‌بازار و خروجی", icon: CreditCard },
   { id: "sync", label: "همگام‌سازی آفلاین اندروید", icon: Smartphone },
+  { id: "support", label: "پشتیبانی و تیکت‌ها", icon: LifeBuoy },
 ];
 
 export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspaceProps) {
   const orgId = session.active_organization?.organization_id ?? null;
   const [tab, setTab] = useState<OrgTab>("dashboard");
+  const [supportRefresh, setSupportRefresh] = useState(0);
   const [loading, setLoading] = useState(false);
 
   // Dashboard
@@ -757,7 +762,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           </div>
           <button
             type="button"
-            onClick={() => loadTab(tab)}
+            onClick={() => tab === "support" ? setSupportRefresh((value) => value + 1) : loadTab(tab)}
             className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -775,6 +780,10 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         )}
 
         {/* MASTER PROMPT 06 — SETTINGS: THEME + USERS & ACCESS MANAGEMENT */}
+        {tab === "support" && (
+          <BusinessSupportTickets organizationId={orgId} refreshKey={supportRefresh} onToast={onToast} />
+        )}
+
         {tab === "settings_access" && (
           <UserAccessSettings orgId={orgId} onToast={onToast} />
         )}

@@ -471,6 +471,16 @@ export async function withTenantTransaction<T>(
   });
 }
 
+/** Execute a verified platform-admin operation with the database RLS bypass scoped to this transaction. */
+export async function withPlatformTransaction<T>(
+  fn: (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => Promise<T>
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT set_config('app.bypass_rls', 'on', true)`);
+    return fn(tx);
+  });
+}
+
 /**
  * Helper to fetch all user organizations with their roles for `/auth/me` & switcher.
  */
