@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import {
   AlertCircle,
   ArrowLeftRight,
@@ -14,7 +15,6 @@ import {
   ChevronRight,
   CreditCard,
   KeyRound,
-  Layers,
   Lock,
   ShieldCheck,
   ShoppingBag,
@@ -408,7 +408,7 @@ export function LoginView({ onSuccess }: LoginViewProps) {
             className="inline-flex items-center gap-1.5 glass-secondary px-3.5 py-1.5 font-semibold hover:border-violet-400 transition-colors"
           >
             <ArrowRight className="h-3.5 w-3.5" />
-            <span>بازگشت به وب‌سایت Business OS</span>
+            <span>بازگشت به وب‌سایت Karvexa</span>
           </Link>
           <span className="text-[11px] font-mono glass-secondary px-3 py-1 text-slate-500">
             API /api/v1 • Glass UI
@@ -420,11 +420,9 @@ export function LoginView({ onSuccess }: LoginViewProps) {
           <div className="lg:col-span-5 glass-primary p-8 flex flex-col justify-between">
             <div>
               <div className="flex items-center gap-3 mb-6">
-                <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white flex items-center justify-center shadow-sm">
-                  <Layers className="h-6 w-6" />
-                </div>
+                <Image src="/icons/karvexa-192.png" width={48} height={48} alt="Karvexa" className="h-12 w-12 rounded-xl object-cover shadow-sm" />
                 <div>
-                  <h1 className="text-xl font-extrabold tracking-tight">Business OS</h1>
+                  <h1 className="text-xl font-extrabold tracking-tight">Karvexa</h1>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     سامانه حسابداری، انبارداری و مدیریت چندمستاجری
                   </p>

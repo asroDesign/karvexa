@@ -4,6 +4,7 @@ import {
   accountGroups,
   accounts,
   branches,
+  accountingCategories,
   categoryAccountMappings,
   costCenters,
   employees,
@@ -359,6 +360,80 @@ export async function processExtendedSyncEntity(params: {
   }
 
   // --------------------------------------------------------------------------
+  // 7. ACCOUNTING CATEGORY (custom quick cashflow category + its GL mapping)
+  // --------------------------------------------------------------------------
+  if (entityType === "accounting_category") {
+    if (operation !== "CREATE") {
+      throw new ApiError(409, "ACCOUNTING_CATEGORY_IMMUTABLE", "دسته‌بندی حسابداری از مسیر همگام‌سازی قابل حذف یا ویرایش نیست.");
+    }
+    return withTenantTransaction(organizationId, async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(accountingCategories)
+        .where(and(eq(accountingCategories.id, clientUuid), eq(accountingCategories.organizationId, organizationId)))
+        .limit(1);
+      if (existing) {
+        return { event_id: ev.event_id, entity_id: clientUuid, server_id: existing.id, status: "ACCEPTED", entity_version: 1, business_status: "CONFIRMED", error: null };
+      }
+
+      const kind = String(p.kind || "EXPENSE").toUpperCase();
+      if (kind !== "EXPENSE" && kind !== "INCOME") {
+        throw new ApiError(422, "ACCOUNTING_CATEGORY_KIND_INVALID", "ماهیت دسته‌بندی باید هزینه یا درآمد باشد.");
+      }
+      const wantedAccountType = kind === "EXPENSE" ? "EXPENSE" : "REVENUE";
+      const accountCode = String(p.account_code || "").trim();
+      const [mappedAccount] = await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.organizationId, organizationId), eq(accounts.code, accountCode)))
+        .limit(1);
+      if (!mappedAccount || mappedAccount.accountType !== wantedAccountType || !mappedAccount.isPostable || !mappedAccount.isActive) {
+        throw new ApiError(422, "ACCOUNTING_CATEGORY_ACCOUNT_INVALID", "حساب انتخاب‌شده با ماهیت دسته‌بندی سازگار یا قابل ثبت نیست.");
+      }
+      const [cashAccount] = await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.organizationId, organizationId), eq(accounts.systemRole, "CASH"), eq(accounts.isActive, true)))
+        .limit(1);
+      const [bankAccount] = cashAccount ? [] : await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.organizationId, organizationId), eq(accounts.systemRole, "BANK"), eq(accounts.isActive, true)))
+        .limit(1);
+      const counterpart = cashAccount ?? bankAccount;
+      if (!counterpart) throw new ApiError(422, "CASH_ACCOUNT_NOT_FOUND", "حساب فعال صندوق یا بانک برای نگاشت دسته‌بندی پیدا نشد.");
+
+      const [category] = await tx
+        .insert(accountingCategories)
+        .values({
+          id: clientUuid,
+          organizationId,
+          kind,
+          scope: "BUSINESS",
+          code: String(p.code || `MOB-${clientUuid.slice(0, 8)}`).toUpperCase(),
+          nameFa: String(p.name_fa || "دسته‌بندی جدید").trim(),
+        })
+        .returning();
+      await tx.insert(categoryAccountMappings).values({
+        organizationId,
+        categoryId: category.id,
+        debitAccountId: kind === "EXPENSE" ? mappedAccount.id : counterpart.id,
+        creditAccountId: kind === "EXPENSE" ? counterpart.id : mappedAccount.id,
+      });
+      await appendSyncChangeLog(tx, {
+        organizationId,
+        entityType: "accounting_category",
+        entityId: category.id,
+        operation: "UPSERT",
+        version: 1,
+        sourceDeviceId: deviceId,
+        payload: { id: category.id, kind: category.kind, code: category.code, name_fa: category.nameFa },
+      });
+      return { event_id: ev.event_id, entity_id: clientUuid, server_id: category.id, status: "ACCEPTED", entity_version: 1, business_status: "CONFIRMED", error: null };
+    });
+  }
+
+  // --------------------------------------------------------------------------
   // 7. QUICK CASHFLOW (Expense/Income with Cost Center & Receipt URL + Auto Journal)
   // --------------------------------------------------------------------------
   if (entityType === "quick_cashflow") {
@@ -375,13 +450,45 @@ export async function processExtendedSyncEntity(params: {
       if (p.scope === "PERSONAL") {
         throw new ApiError(422, "USE_PERSONAL_TRANSACTION", "هزینه شخصی باید با نوع personal_transaction ارسال شود.");
       }
+      if (!isUuid(catId) || (kind !== "EXPENSE" && kind !== "INCOME")) {
+        throw new ApiError(422, "QUICK_CASHFLOW_CATEGORY_INVALID", "دسته‌بندی یا ماهیت تراکنش معتبر نیست.");
+      }
 
       if (p.cost_center_id) {
         const [cc] = await tx.select().from(costCenters).where(and(eq(costCenters.id, String(p.cost_center_id)), eq(costCenters.organizationId, organizationId))).limit(1);
         if (!cc || !cc.isActive) throw new ApiError(409, "COST_CENTER_INVALID", "مرکز هزینه معتبر یا فعال نیست.");
       }
 
-      const [mapping] = await tx.select().from(categoryAccountMappings).where(and(eq(categoryAccountMappings.organizationId, organizationId), eq(categoryAccountMappings.categoryId, catId))).limit(1);
+      let [mapping] = await tx.select().from(categoryAccountMappings).where(and(eq(categoryAccountMappings.organizationId, organizationId), eq(categoryAccountMappings.categoryId, catId))).limit(1);
+      if (!mapping) {
+        const [category] = await tx.select().from(accountingCategories).where(and(eq(accountingCategories.id, catId), eq(accountingCategories.organizationId, organizationId))).limit(1);
+        const accountCode = String(p.account_code || "").trim();
+        const expectedType = kind === "EXPENSE" ? "EXPENSE" : "REVENUE";
+        const [mappedAccount] = await tx.select().from(accounts).where(and(eq(accounts.organizationId, organizationId), eq(accounts.code, accountCode))).limit(1);
+        if (!mappedAccount || mappedAccount.accountType !== expectedType || !mappedAccount.isPostable || !mappedAccount.isActive) {
+          throw new ApiError(422, "CATEGORY_ACCOUNT_MAPPING_MISSING", "حساب معین سازگار برای دسته‌بندی پیدا نشد.");
+        }
+        const [cashAccount] = await tx.select().from(accounts).where(and(eq(accounts.organizationId, organizationId), eq(accounts.systemRole, "CASH"), eq(accounts.isActive, true))).limit(1);
+        const [bankAccount] = cashAccount ? [] : await tx.select().from(accounts).where(and(eq(accounts.organizationId, organizationId), eq(accounts.systemRole, "BANK"), eq(accounts.isActive, true))).limit(1);
+        const counterpart = cashAccount ?? bankAccount;
+        if (!counterpart) throw new ApiError(422, "CASH_ACCOUNT_NOT_FOUND", "حساب صندوق یا بانک برای ثبت سند پیدا نشد.");
+        if (!category) {
+          await tx.insert(accountingCategories).values({
+            id: catId,
+            organizationId,
+            kind,
+            scope: "BUSINESS",
+            code: String(p.category_code || `MOB-${catId.slice(0, 8)}`).toUpperCase(),
+            nameFa: String(p.category_name || "دسته‌بندی جدید").trim(),
+          });
+        }
+        [mapping] = await tx.insert(categoryAccountMappings).values({
+          organizationId,
+          categoryId: catId,
+          debitAccountId: kind === "EXPENSE" ? mappedAccount.id : counterpart.id,
+          creditAccountId: kind === "EXPENSE" ? counterpart.id : mappedAccount.id,
+        }).returning();
+      }
       if (!mapping) throw new ApiError(422, "CATEGORY_ACCOUNT_MAPPING_MISSING", "نگاشت حسابداری دسته‌بندی یافت نشد.");
 
       const [fa] = await tx.select().from(financialAccounts).where(and(eq(financialAccounts.id, finAccId), eq(financialAccounts.organizationId, organizationId))).limit(1);

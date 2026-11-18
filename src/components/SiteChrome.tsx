@@ -3,7 +3,8 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Layers, LogIn, Menu, Moon, Sun, X } from "lucide-react";
+import Image from "next/image";
+import { LogIn, Menu, Moon, Sun, X } from "lucide-react";
 import { useTheme } from "./ThemeProvider";
 
 const NAV_LINKS = [
@@ -24,11 +25,9 @@ export function SiteHeader() {
     <header className="sticky top-0 z-40 glass-nav">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
         <Link href="/" className="flex items-center gap-2.5 shrink-0">
-          <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white flex items-center justify-center shadow-sm">
-            <Layers className="h-5 w-5" />
-          </div>
+          <Image src="/icons/karvexa-192.png" width={40} height={40} alt="Karvexa" className="h-9 w-9 rounded-xl object-cover shadow-sm" />
           <div>
-            <div className="font-extrabold text-sm tracking-tight">Business OS</div>
+            <div className="font-extrabold text-sm tracking-tight">Karvexa</div>
             <div className="text-[10px] text-slate-500 dark:text-slate-400">
               سیستم جامع حسابداری و انبارداری SaaS
             </div>
@@ -111,10 +110,8 @@ export function SiteFooter() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 grid grid-cols-1 md:grid-cols-4 gap-8 text-xs">
         <div className="md:col-span-2 space-y-3">
           <div className="flex items-center gap-2.5">
-            <div className="h-8 w-8 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white flex items-center justify-center">
-              <Layers className="h-4 w-4" />
-            </div>
-            <span className="font-extrabold text-sm">Business OS</span>
+            <Image src="/icons/karvexa-192.png" width={36} height={36} alt="Karvexa" className="h-8 w-8 rounded-xl object-cover" />
+            <span className="font-extrabold text-sm">Karvexa</span>
           </div>
           <p className="text-slate-500 dark:text-slate-400 leading-relaxed max-w-md">
             پلتفرم ابری (SaaS) و آفلاین اندروید مدیریت کسب‌وکار، حسابداری دوبل استاندارد، انبارداری اتمیک، خزانه و چک، مالی شخصی مالک و گزارش‌گیری دقیق مالی با معماری چندمستاجری PostgreSQL RLS.
@@ -149,7 +146,7 @@ export function SiteFooter() {
         </div>
       </div>
       <div className="border-t border-slate-200/50 dark:border-slate-800/70 py-4 text-center text-[11px] text-slate-500">
-        © ۱۴۰۵ Business OS — سامانه یکپارچه حسابداری، انبارداری و مدیریت کسب‌وکار. تمامی حقوق محفوظ است.
+        © ۱۴۰۵ Karvexa — سامانه یکپارچه حسابداری، انبارداری و مدیریت کسب‌وکار. تمامی حقوق محفوظ است.
       </div>
     </footer>
   );

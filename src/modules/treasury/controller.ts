@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
 import {
@@ -15,6 +15,7 @@ import {
   idempotencyKeys,
   invoicePaymentAllocations,
   organizations,
+  users,
 } from "@/db/schema";
 import { ensureSeeded } from "@/db/seed";
 import { ensurePrompt05OrgDefaults } from "@/db/seed-prompt05";
@@ -31,6 +32,7 @@ import {
 import { gregorianIsoToJalali, jalaliToGregorianIso, normalizePersianDigits, resolveCanonicalDate } from "@/lib/jalali";
 import { requireOrgContext, withTenantTransaction } from "@/lib/tenant";
 import { createJournalEntryTx, reverseJournalEntryTx } from "@/modules/accounting/service";
+import { sendSmsViaGateway } from "@/modules/sms/service";
 
 const createFinAccountSchema = z.object({
   name: z.string().min(2),
@@ -760,6 +762,74 @@ export async function handleChequeRoutes(
   await ensureSeeded();
   const id = segments[1];
   const action = segments[2];
+
+  // POST /api/v1/cheques/:id/reminder — send one idempotent due-date SMS to the authenticated user.
+  if (method === "POST" && action === "reminder" && id) {
+    const ctx = await requireOrgContext(req, "cheques.manage");
+    const body = z.object({ days_before: z.number().int().min(1).max(30) }).parse(await req.json());
+    const [cheque] = await db
+      .select()
+      .from(cheques)
+      .where(and(eq(cheques.id, id), eq(cheques.organizationId, ctx.organizationId), isNull(cheques.deletedAt)))
+      .limit(1);
+    if (!cheque) throw new ApiError(404, "CHEQUE_NOT_FOUND", "چک متعلق به این کسب‌وکار پیدا نشد.");
+    if (!["RECEIVED", "ISSUED", "IN_COLLECTION", "DEPOSITED"].includes(cheque.status)) {
+      throw new ApiError(409, "CHEQUE_NOT_REMINDABLE", "برای چک تسویه‌شده یا برگشتی یادآور ارسال نمی‌شود.");
+    }
+    const timezone = ctx.organization.timezone || "Asia/Tehran";
+    const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" })
+      .formatToParts(new Date());
+    const part = (name: string) => todayParts.find((item) => item.type === name)?.value ?? "";
+    const today = `${part("year")}-${part("month")}-${part("day")}`;
+    const daysUntilDue = Math.floor((Date.parse(`${cheque.dueDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+    if (daysUntilDue < 0 || daysUntilDue > body.days_before) {
+      throw new ApiError(422, "CHEQUE_REMINDER_OUTSIDE_WINDOW", "ارسال پیامک فقط در بازهٔ تنظیم‌شده تا سررسید مجاز است.");
+    }
+    const [recipient] = await db.select({ phone: users.phone, mobileVerified: users.mobileVerified })
+      .from(users).where(eq(users.id, ctx.userId)).limit(1);
+    if (!recipient?.phone || !recipient.mobileVerified) {
+      throw new ApiError(422, "VERIFIED_MOBILE_REQUIRED", "برای ارسال یادآور، شماره موبایل تأییدشدهٔ حساب کاربری لازم است.");
+    }
+    const idemKey = req.headers.get("idempotency-key")?.trim() || "";
+    if (!idemKey || idemKey.length > 160) throw new ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "کلید یکتای ارسال یادآور معتبر نیست.");
+    const endpoint = `/api/v1/cheques/${id}/reminder`;
+    const requestHash = sha256(JSON.stringify({ cheque_id: cheque.id, due_date: cheque.dueDate, days_before: body.days_before }));
+    const reservation = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${ctx.organizationId}:${idemKey}`}))`);
+      const [existing] = await tx.select().from(idempotencyKeys)
+        .where(and(eq(idempotencyKeys.organizationId, ctx.organizationId), eq(idempotencyKeys.key, idemKey))).limit(1);
+      if (existing && existing.expiresAt > new Date()) {
+        if (existing.requestHash !== requestHash || existing.endpoint !== endpoint) {
+          throw new ApiError(409, "IDEMPOTENCY_PAYLOAD_MISMATCH", "کلید یکتا قبلاً برای یادآور دیگری استفاده شده است.");
+        }
+        if (existing.statusCode === 200 && existing.responseBody.sent === true) return "sent" as const;
+        if (existing.statusCode === 202 && Date.now() - existing.createdAt.getTime() < 5 * 60_000) return "pending" as const;
+        await tx.delete(idempotencyKeys).where(eq(idempotencyKeys.id, existing.id));
+      }
+      await tx.insert(idempotencyKeys).values({
+        organizationId: ctx.organizationId, key: idemKey, endpoint, requestHash, statusCode: 202,
+        responseBody: { pending: true }, expiresAt: new Date(Date.now() + 365 * 86_400_000),
+      });
+      return "reserved" as const;
+    });
+    if (reservation === "sent") return ok({ sent: true, already_sent: true });
+    if (reservation === "pending") return ok({ sent: false, pending: true });
+
+    const message = `یادآوری سررسید چک ${cheque.chequeType === "RECEIVABLE" ? "دریافتی" : "صادره"}؛ شماره ${cheque.sayadId}، بانک ${cheque.bankName}، مبلغ ${formatDecimal(parseDecimal(cheque.amount), 2)}، تاریخ سررسید ${gregorianIsoToJalali(cheque.dueDate)}.`;
+    try {
+      const sent = await sendSmsViaGateway({
+        mobile: recipient.phone, purpose: "NOTIFICATION", message, organizationId: ctx.organizationId,
+      });
+      const responseBody = { sent: true, already_sent: false, days_before: body.days_before, message_id: sent.message_id };
+      await db.update(idempotencyKeys).set({ statusCode: 200, responseBody })
+        .where(and(eq(idempotencyKeys.organizationId, ctx.organizationId), eq(idempotencyKeys.key, idemKey)));
+      return ok(responseBody);
+    } catch (error) {
+      await db.update(idempotencyKeys).set({ statusCode: 502, responseBody: { sent: false, failed: true } })
+        .where(and(eq(idempotencyKeys.organizationId, ctx.organizationId), eq(idempotencyKeys.key, idemKey)));
+      throw error;
+    }
+  }
 
   // GET /api/v1/cheques/dashboard (§10.1 Summary Cards)
   if (method === "GET" && id === "dashboard") {

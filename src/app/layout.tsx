@@ -13,10 +13,11 @@ const vazirmatn = Vazirmatn({
 });
 
 export const metadata: Metadata = {
-  title: "Business OS — سامانه جامع حسابداری، انبارداری و مدیریت پلتفرم",
+  title: "Karvexa — سامانه جامع حسابداری، انبارداری و مدیریت کسب‌وکار",
   description:
     "پلتفرم Business OS با طراحی Glassmorphism، تایپوگرافی آسروتراول، داشبورد مالی روزانه، مدیریت دسترسی و چرخه کامل سال مالی",
   manifest: "/manifest.webmanifest",
+  icons: { icon: "/favicon.ico", apple: "/icons/karvexa-192.png" },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

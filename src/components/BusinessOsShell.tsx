@@ -1,10 +1,10 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
 import {
   Building2,
   CheckCircle2,
-  Layers,
   LogOut,
   Moon,
   Shield,
@@ -75,7 +75,7 @@ export function BusinessOsShell() {
   if (booting) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 text-sm text-slate-600">
-        در حال بارگذاری سامانه Business OS...
+        در حال بارگذاری Karvexa...
       </div>
     );
   }
@@ -93,18 +93,10 @@ export function BusinessOsShell() {
       <header className="sticky top-0 z-30 glass-nav">
         <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div
-              className={`h-9 w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm ${
-                effectiveRealm === "PLATFORM"
-                  ? "bg-gradient-to-br from-violet-600 to-indigo-600"
-                  : "bg-gradient-to-br from-emerald-600 to-teal-600"
-              }`}
-            >
-              <Layers className="h-5 w-5" />
-            </div>
+            <Image src="/icons/karvexa-192.png" width={40} height={40} alt="Karvexa" className="h-9 w-9 rounded-xl object-cover shrink-0 shadow-sm" />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-bold text-sm">Business OS</span>
+                <span className="font-bold text-sm">Karvexa</span>
                 <span className="hidden sm:inline text-[10px] font-mono px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300">
                   Glass UI v1.1
                 </span>
