@@ -167,12 +167,14 @@ type ProductLine = { product_id: string; variant_id: string; quantity: string; u
 type ReceiveLine = { transfer_item_id: string; product_id: string; accepted_quantity: string; missing_qty: string; damaged_qty: string; rejected_quantity: string; discrepancy_description: string; evidence_url: string };
 type IssueLine = { product_id: string; variant_id: string; quantity: string; unit_cost: string };
 type TransferLine = { product_id: string; variant_id: string; quantity: string };
-type InventoryView = "overview" | "operations" | "ledger" | "transfers";
+type StockCountLine = { product_id: string; variant_id: string; counted_qty: string };
+type InventoryView = "overview" | "operations" | "ledger" | "transfers" | "counts";
 const inventoryViews: Array<{ id: InventoryView; label: string }> = [
   { id: "overview", label: "موجودی و انبارها" },
   { id: "operations", label: "ثبت رسید خرید / تعدیل" },
   { id: "ledger", label: "کاردکس و گردش" },
   { id: "transfers", label: "حواله بین انبارها" },
+  { id: "counts", label: "انبارگردانی" },
 ];
 const transferStatusLabels: Record<string, string> = {
   DRAFT: "پیش‌نویس",
@@ -196,6 +198,9 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [movements, setMovements] = useState<Row[]>([]);
   const [receipts, setReceipts] = useState<Row[]>([]);
   const [issues, setIssues] = useState<Row[]>([]);
+  const [counts, setCounts] = useState<Row[]>([]);
+  const [stockCount, setStockCount] = useState({ warehouse_id: "", count_date_jalali: jalaliToday(), notes: "انبارگردانی دوره‌ای" });
+  const [stockCountLines, setStockCountLines] = useState<StockCountLine[]>([{ product_id: "", variant_id: "", counted_qty: "" }]);
   const [stockSearch, setStockSearch] = useState("");
   const [inventoryView, setInventoryView] = useState<InventoryView>("overview");
   const [transferSearch, setTransferSearch] = useState("");
@@ -234,7 +239,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
       if (warehouseFilter) movementQuery.set("warehouse_id", warehouseFilter);
       if (movementDateFrom) movementQuery.set("date_from", movementDateFrom);
       if (movementDateTo) movementQuery.set("date_to", movementDateTo);
-      const [wh, prod, cont, fin, trans, stockResult, movementRows, receiptRows, issueRows, variantResult] = await Promise.all([
+      const [wh, prod, cont, fin, trans, stockResult, movementRows, receiptRows, issueRows, countRows, variantResult] = await Promise.all([
         apiFetch<Row[]>("/api/v1/warehouses?per_page=100", { organizationId: orgId }),
         apiFetch<Row[]>("/api/v1/products?per_page=200", { organizationId: orgId }),
         apiFetch<Row[]>("/api/v1/contacts?per_page=200", { organizationId: orgId }),
@@ -244,17 +249,19 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         apiFetch<Row[]>(`/api/v1/inventory/movements?${movementQuery}`, { organizationId: orgId }),
         apiFetch<Row[]>("/api/v1/inventory/receipts?per_page=100", { organizationId: orgId }),
         apiFetch<Row[]>("/api/v1/inventory/issues?per_page=100", { organizationId: orgId }),
+        apiFetch<Row[]>("/api/v1/inventory/counts?per_page=100", { organizationId: orgId }),
         apiFetch<Row>("/api/v1/variants", { organizationId: orgId }),
       ]);
       const productRows = rows(prod).filter((product) => Boolean(product.is_active ?? true));
       const variantRows = rows(variantResult.variants).filter((variant) => Boolean(variant.is_active ?? true));
       const availableWarehouses = rows(wh).filter((item) => Boolean(item.is_active ?? true));
       setWarehouses(rows(wh)); setProducts(productRows); setVariants(variantRows); setContacts(rows(cont)); setTreasury(rows(fin)); setTransfers(rows(trans));
-      setStock(stockResult); setMovements(rows(movementRows)); setReceipts(rows(receiptRows)); setIssues(rows(issueRows));
+      setStock(stockResult); setMovements(rows(movementRows)); setReceipts(rows(receiptRows)); setIssues(rows(issueRows)); setCounts(rows(countRows));
       setReceipt((old) => ({ ...old, warehouse_id: old.warehouse_id || text(availableWarehouses[0]?.id), supplier_id: old.supplier_id || text(cont.find((item) => ["SUPPLIER", "VENDOR"].includes(text(item.type).toUpperCase()))?.id), payment_bank_account_id: old.payment_bank_account_id || text(fin[0]?.id) }));
       setReceiptItems((old) => old.map((line) => ({ ...line, product_id: line.product_id || text(productRows[0]?.id), unit_price: line.unit_price === "" ? text(productRows[0]?.purchase_price, "") : line.unit_price })));
       setTransferForm((old) => ({ ...old, source_warehouse_id: old.source_warehouse_id || text(availableWarehouses[0]?.id), destination_warehouse_id: old.destination_warehouse_id || text(availableWarehouses[1]?.id) }));
       setIssue((old) => ({ ...old, warehouse_id: old.warehouse_id || text(availableWarehouses[0]?.id) }));
+      setStockCount((old) => ({ ...old, warehouse_id: old.warehouse_id || text(availableWarehouses[0]?.id) }));
       setTransferItems((old) => old.map((line) => ({ ...line, product_id: line.product_id || text(productRows[0]?.id) })));
       setIssueItems((old) => old.map((line) => ({ ...line, product_id: line.product_id || text(productRows[0]?.id) })));
     } catch (error) { onToast(error instanceof Error ? error.message : "دریافت اطلاعات انبار ناموفق بود", "error"); }
@@ -265,6 +272,49 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
 
   function updateProductLine(index: number, changes: Partial<ProductLine>) {
     setReceiptItems((current) => current.map((line, i) => i === index ? { ...line, ...changes } : line));
+  }
+
+  async function createStockCount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!orgId) return;
+    const normalize = (raw: string) => raw
+      .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0))
+      .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+      .replace(/[٬,]/g, "").replace(/٫/g, ".").trim();
+    const validLines = stockCountLines.filter((line) => line.product_id && line.counted_qty.trim() !== "");
+    if (!stockCount.warehouse_id || !validLines.length) {
+      onToast("انبار و دست‌کم یک قلم با مقدار شمارش‌شده را وارد کنید.", "error");
+      return;
+    }
+    if (validLines.some((line) => !/^\d+(\.\d{1,4})?$/.test(normalize(line.counted_qty)))) {
+      onToast("مقدار شمارش باید عددی و حداکثر چهار رقم اعشار داشته باشد.", "error");
+      return;
+    }
+    const keys = validLines.map((line) => line.product_id + ":" + (line.variant_id || "BASE"));
+    if (new Set(keys).size !== keys.length) {
+      onToast("هر کالا یا تنوع را فقط یک‌بار در سند انبارگردانی وارد کنید.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiFetch("/api/v1/inventory/counts", {
+        method: "POST", organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          warehouse_id: stockCount.warehouse_id,
+          count_date_jalali: stockCount.count_date_jalali,
+          notes: stockCount.notes.trim(),
+          items: validLines.map((line) => ({ product_id: line.product_id, variant_id: line.variant_id || null, counted_qty: normalize(line.counted_qty) })),
+        }),
+      });
+      onToast("انبارگردانی ثبت شد؛ اختلاف شمارش با کاردکس در سند تعدیل و حسابداری اعمال شد.");
+      setStockCountLines([{ product_id: "", variant_id: "", counted_qty: "" }]);
+      await reload();
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "ثبت انبارگردانی ناموفق بود", "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function createReceipt(event: FormEvent<HTMLFormElement>) {
@@ -491,7 +541,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     finally { transferRequestsInFlight.current.delete(requestId); setTransferPendingAction(""); }
   }
 
-  const lineSelect = (value: string, onChange: (value: string) => void) => <ProductPickerModal products={products} value={value} onChange={onChange} />;
+  const lineSelect = (value: string, onChange: (value: string) => void, onProductCreated?: (product: Row) => void) => <ProductPickerModal products={products} value={value} onChange={onChange} organizationId={orgId} onToast={onToast} onProductCreated={(product) => { setProducts((current) => [product, ...current.filter((item) => text(item.id) !== text(product.id))]); onProductCreated?.(product); }} />;
   const variantSelect = (productId: string, value: string, onChange: (value: string) => void) => {
     const options = variants.filter((variant) => text(variant.product_id) === productId);
     if (!options.length) return null;
@@ -560,7 +610,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         {inventoryView === "operations" && <form onSubmit={createReceipt} className={`${card} space-y-3`}>
           <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-xs font-bold">ثبت رسید خرید / تعدیل</h4><p className="mt-1 text-[11px] text-slate-500">رسید خرید با بهای تمام‌شده یا تعدیل افزایشی/کاهشی با بهای میانگین را ثبت کنید.</p></div><div className="flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setReceiptMode("PURCHASE")} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "PURCHASE" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>رسید خرید</button><button type="button" onClick={() => setReceiptMode("ADJUSTMENT")} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "ADJUSTMENT" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>تعدیل موجودی</button></div></div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label>{receiptMode === "PURCHASE" && <label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label>}{receiptMode === "PURCHASE" && <label className="text-[11px]">شماره فاکتور تأمین‌کننده<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label>}{receiptMode === "ADJUSTMENT" && <label className="text-[11px]">نوع تعدیل<select className={`${field} mt-1`} value={adjustmentDirection} onChange={(event) => setAdjustmentDirection(event.target.value as "IN" | "OUT")}><option value="IN">افزایش موجودی</option><option value="OUT">کاهش موجودی</option></select></label>}<label className="text-[11px]">{receiptMode === "PURCHASE" ? "تاریخ فاکتور" : "تاریخ تعدیل"}<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
-          <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className={`grid grid-cols-1 gap-2 ${receiptMode === "PURCHASE" ? "sm:grid-cols-[1.3fr_1fr_.65fr_1fr]" : "sm:grid-cols-[1.5fr_1fr_1fr]"}`}>{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, line.unit_price) }); })}{variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label={receiptMode === "PURCHASE" ? "تعداد خرید" : adjustmentDirection === "IN" ? "مقدار افزایش موجودی" : "مقدار کاهش موجودی"} placeholder={receiptMode === "PURCHASE" ? "تعداد" : adjustmentDirection === "IN" ? "مقدار ورود" : "مقدار خروج"} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/>{receiptMode === "PURCHASE" ? <input className={field} aria-label="قیمت واحد" placeholder="قیمت خرید واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/> : <div className="rounded-xl bg-slate-50 px-3 py-2 text-[10px] text-slate-600">موجودی فعلی: {formatQty(onHandQty(receipt.warehouse_id, line.product_id, line.variant_id))} • موجودی بعد از تعدیل: {formatQty((onHandQty(receipt.warehouse_id, line.product_id, line.variant_id) + (adjustmentDirection === "IN" ? 1 : -1) * Number(line.quantity || 0)).toFixed(4))}</div>}</div>)}</div>
+          <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className={`grid grid-cols-1 gap-2 ${receiptMode === "PURCHASE" ? "sm:grid-cols-[1.3fr_1fr_.65fr_1fr]" : "sm:grid-cols-[1.5fr_1fr_1fr]"}`}>{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price ?? product?.defaultPurchasePrice, line.unit_price) }); }, (product) => updateProductLine(index, { unit_price: text(product.purchase_price ?? product.defaultPurchasePrice, line.unit_price) }))}{variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label={receiptMode === "PURCHASE" ? "تعداد خرید" : adjustmentDirection === "IN" ? "مقدار افزایش موجودی" : "مقدار کاهش موجودی"} placeholder={receiptMode === "PURCHASE" ? "تعداد" : adjustmentDirection === "IN" ? "مقدار ورود" : "مقدار خروج"} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/>{receiptMode === "PURCHASE" ? <input className={field} aria-label="قیمت واحد" placeholder="قیمت خرید واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/> : <div className="rounded-xl bg-slate-50 px-3 py-2 text-[10px] text-slate-600">موجودی فعلی: {formatQty(onHandQty(receipt.warehouse_id, line.product_id, line.variant_id))} • موجودی بعد از تعدیل: {formatQty((onHandQty(receipt.warehouse_id, line.product_id, line.variant_id) + (adjustmentDirection === "IN" ? 1 : -1) * Number(line.quantity || 0)).toFixed(4))}</div>}</div>)}</div>
           <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setReceiptItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "1.0000", unit_price: text(products[0]?.purchase_price, "0.00") }])}>افزودن قلم</button><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" disabled={receiptItems.length <= 1} onClick={() => setReceiptItems((items) => items.slice(0, -1))}>حذف قلم آخر</button></div>
           {receiptMode === "PURCHASE" && <><div className="grid grid-cols-2 gap-2 md:grid-cols-4">{([["shipping_cost", "هزینه حمل"], ["customs_and_extra_cost", "گمرک و سایر هزینه"], ["supplier_discount", "تخفیف"], ["paid_amount", "پرداخت‌شده"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>{Number(receipt.paid_amount) > 0 && <label className="block text-[11px]">پرداخت از حساب<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label>}</>}
           {receiptMode === "ADJUSTMENT" && <p className="rounded-xl bg-amber-50 p-3 text-[10px] leading-5 text-amber-900">تعدیل از مسیر انبارگردانی ثبت می‌شود؛ برای کاهش، موجودی کافی الزامی است. ارزش تعدیل با بهای میانگین/FIFO کالا محاسبه و سند دوطرفهٔ موجودی و بهای تمام‌شده از API صادر می‌شود.</p>}
@@ -584,6 +634,48 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
           </form>}
         </div>
       </div>
+      {inventoryView === "counts" && <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <form onSubmit={createStockCount} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5">
+          <div><h4 className="text-sm font-bold">انبارگردانی چندقلمی</h4><p className="mt-1 text-[11px] text-slate-500">مقدار واقعی هر قلم را ثبت کنید؛ سامانه آن را با کاردکس همان انبار مقایسه و اختلاف را به‌صورت سند تعدیل ثبت می‌کند.</p></div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-[11px]">انبار{warehouseSelect(stockCount.warehouse_id, (value) => setStockCount({ ...stockCount, warehouse_id: value }))}</label>
+            <label className="text-[11px]">تاریخ شمارش شمسی<JalaliDatePicker className="mt-1" value={stockCount.count_date_jalali} onChange={(value) => setStockCount({ ...stockCount, count_date_jalali: value })}/></label>
+            <label className="text-[11px] sm:col-span-2">شرح سند<input className={field + " mt-1"} value={stockCount.notes} onChange={(event) => setStockCount({ ...stockCount, notes: event.target.value })}/></label>
+          </div>
+          <div className="flex items-center justify-between gap-2"><strong className="text-xs">اقلام شمارش</strong><button type="button" onClick={() => setStockCountLines((current) => [...current, { product_id: "", variant_id: "", counted_qty: "" }])} className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-[11px] font-semibold text-teal-800">افزودن قلم</button></div>
+          <div className="space-y-2">
+            {stockCountLines.map((line, index) => {
+              const lineVariants = variants.filter((variant) => text(variant.product_id ?? variant.productId) === line.product_id);
+              const systemQty = line.product_id ? onHandQty(stockCount.warehouse_id, line.product_id, line.variant_id) : 0;
+              const normalizedCount = line.counted_qty.replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0)).replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660)).replace(/[٬,]/g, "").replace(/٫/g, ".");
+              const difference = normalizedCount !== "" && Number.isFinite(Number(normalizedCount)) ? Number(normalizedCount) - systemQty : null;
+              return <div key={index} className="grid grid-cols-1 items-end gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="sm:col-span-2"><label className="mb-1 block text-[10px] text-slate-500">کالا یا خدمت</label>{lineSelect(line.product_id, (productId) => setStockCountLines((current) => current.map((item, i) => i === index ? { ...item, product_id: productId, variant_id: "" } : item)))}</div>
+                <label className="text-[10px] text-slate-500">تنوع{lineVariants.length > 0 ? <select className={field + " mt-1"} value={line.variant_id} onChange={(event) => setStockCountLines((current) => current.map((item, i) => i === index ? { ...item, variant_id: event.target.value } : item))}><option value="">کالای پایه</option>{lineVariants.map((variant) => <option key={text(variant.id)} value={text(variant.id)}>{text(variant.variant_name ?? variant.variantName ?? variant.sku)}</option>)}</select> : <span className="mt-1 block rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-400">بدون تنوع</span>}</label>
+                <label className="text-[10px] text-slate-500">مقدار واقعی شمارش‌شده<input required min="0" step="0.0001" dir="ltr" inputMode="decimal" className={field + " mt-1 text-left font-mono"} value={line.counted_qty} onChange={(event) => setStockCountLines((current) => current.map((item, i) => i === index ? { ...item, counted_qty: event.target.value } : item))}/></label>
+                <div className="flex items-center justify-between text-[10px] sm:col-span-2 xl:col-span-4"><span className="text-slate-600">کاردکس: <b>{formatQty(systemQty)}</b>{difference !== null && <> • اختلاف: <b className={difference < 0 ? "text-rose-700" : difference > 0 ? "text-emerald-700" : "text-slate-700"}>{difference > 0 ? "+" : ""}{formatQty(difference)}</b></>}</span><button type="button" disabled={stockCountLines.length <= 1} onClick={() => setStockCountLines((current) => current.filter((_, i) => i !== index))} className="text-rose-700 underline disabled:opacity-40">حذف قلم</button></div>
+              </div>;
+            })}
+          </div>
+          <button type="submit" disabled={busy} className={button + " w-full"}>{busy ? "در حال ثبت…" : "ثبت انبارگردانی و تعدیل اختلاف‌ها"}</button>
+        </form>
+        <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5">
+          <div className="flex items-center justify-between gap-2"><h4 className="text-sm font-bold">اسناد انبارگردانی</h4><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px]">{counts.length} سند</span></div>
+          <div className="max-h-[680px] space-y-2 overflow-y-auto">
+            {counts.map((count) => <article key={text(count.id)} className="rounded-xl border border-slate-100 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">{text(count.countNumber ?? count.count_number, "انبارگردانی")}</strong><span className="text-[10px] text-slate-500">{gregorianIsoToJalali(text(count.countDate ?? count.count_date))} • {text(count.warehouse_name)}</span></div>
+              {text(count.notes) && <p className="mt-1 text-[10px] text-slate-500">{text(count.notes)}</p>}
+              <div className="mt-2 space-y-1">{rows(count.items).map((item, itemIndex) => {
+                const system = Number(item.systemQty ?? item.system_qty ?? 0);
+                const counted = Number(item.countedQty ?? item.counted_qty ?? 0);
+                const delta = counted - system;
+                return <div key={text(item.id, String(itemIndex))} className="flex flex-wrap justify-between gap-x-3 text-[10px]"><span>{text(item.product_name)}{text(item.variant_name) ? " • " + text(item.variant_name) : ""}</span><span>کاردکس {formatQty(system)} ← واقعی {formatQty(counted)} <b className={delta < 0 ? "text-rose-700" : delta > 0 ? "text-emerald-700" : ""}>{delta > 0 ? "+" : ""}{formatQty(delta)}</b></span></div>;
+              })}</div>
+            </article>)}
+            {!counts.length && <p className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">هنوز سند انبارگردانی ثبت نشده است.</p>}
+          </div>
+        </section>
+      </div>}
       {inventoryView === "ledger" && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">کاردکس از دفتر گردش انبار</h4><span className="text-[10px] text-slate-500">{movements.length} گردش از سرور</span></div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">از تاریخ شمسی<JalaliDatePicker className="mt-1" value={movementDateFrom} onChange={(value) => setMovementDateFrom(value)} format="iso" placeholder="از تاریخ شمسی" allowEmpty/></label><label className="text-[11px]">تا تاریخ شمسی<JalaliDatePicker className="mt-1" value={movementDateTo} onChange={(value) => setMovementDateTo(value)} format="iso" placeholder="تا تاریخ شمسی" allowEmpty/></label></div>
@@ -846,6 +938,8 @@ export function CommerceParityPanel({
   onToast: Toast;
   onRefresh: () => void;
 }) {
+  const [createdProducts, setCreatedProducts] = useState<Row[]>([]);
+  const purchaseProducts = useMemo(() => [...createdProducts, ...products.filter((product) => !createdProducts.some((created) => text(created.id) === text(product.id)))], [createdProducts, products]);
   const [purchase, setPurchase] = useState<PurchaseDraft>({
     supplier_id: "", warehouse_id: "", document_date_jalali: jalaliToday(), due_date_jalali: "",
     discount_total: "0.00", shipping_cost: "0.00", other_costs: "0.00", rounding_adjustment: "0.00",
@@ -904,7 +998,7 @@ export function CommerceParityPanel({
     const validItems = purchase.items.filter((line) => line.product_id && purchaseNumber(line.quantity) > 0 && purchaseNumber(line.unit_price) >= 0);
     const subtotal = validItems.reduce((sum, line) => sum + purchaseNumber(line.quantity) * purchaseNumber(line.unit_price), 0);
     const discountTotal = validItems.reduce((sum, line) => sum + purchaseLineDiscount(line), 0) + purchaseNumber(purchase.discount_total);
-    const otherCostTotal = purchaseNumber(purchase.other_costs) + purchaseNumber(purchase.rounding_adjustment);
+    const otherCostTotal = purchaseNumber(purchase.other_costs);
     const allocatedPayments = paymentAllocations.reduce((sum, item) => sum + purchaseNumber(item.amount), 0);
     if (!supplierId || !warehouseId || !validItems.length) { onToast("تأمین‌کننده، انبار و دست‌کم یک قلم خرید معتبر را انتخاب کنید.", "error"); return; }
     const invalidLineDiscount = validItems.some((line) => purchaseLineDiscount(line) > purchaseNumber(line.quantity) * purchaseNumber(line.unit_price));
@@ -925,6 +1019,7 @@ export function CommerceParityPanel({
           tax_calculation_mode: purchase.tax_mode === "AUTO" ? "AUTO" : "OVERRIDE",
           shipping_cost: purchase.shipping_cost,
           other_costs: otherCostTotal.toFixed(2),
+          rounding_adjustment: purchase.rounding_adjustment,
           notes: purchase.notes,
           receipt_url: purchase.receipt_url || null,
           items: validItems.map((line) => {
@@ -1015,7 +1110,7 @@ export function CommerceParityPanel({
             const lineVariants = variants.filter((variant) => text(variant.product_id ?? variant.productId) === line.product_id);
             const lineAmount = Math.max(0, purchaseNumber(line.quantity) * purchaseNumber(line.unit_price) - purchaseLineDiscount(line));
             return <div key={index} className="grid grid-cols-1 items-end gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-6">
-              <div className="sm:col-span-2"><label className="mb-1 block text-[10px] text-slate-500">کالا یا خدمت</label><ProductPickerModal products={products} value={line.product_id} onChange={(productId) => { const product = products.find((item) => text(item.id) === productId); updatePurchaseLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, "0.00"), tax_rate: text(product?.tax_rate, "10.00") }); }} /></div>
+              <div className="sm:col-span-2"><label className="mb-1 block text-[10px] text-slate-500">کالا یا خدمت</label><ProductPickerModal products={purchaseProducts} value={line.product_id} organizationId={orgId} onToast={onToast} onProductCreated={(product) => { setCreatedProducts((current) => [product, ...current.filter((item) => text(item.id) !== text(product.id))]); updatePurchaseLine(index, { unit_price: text(product.purchase_price, "0.00"), tax_rate: text(product.tax_rate, "10.00") }); }} onChange={(productId) => { const product = purchaseProducts.find((item) => text(item.id) === productId); updatePurchaseLine(index, product ? { product_id: productId, variant_id: "", unit_price: text(product.purchase_price, "0.00"), tax_rate: text(product.tax_rate, "10.00") } : { product_id: productId, variant_id: "" }); }} /></div>
               <label className="text-[10px] text-slate-500">تنوع<select className={`${field} mt-1`} value={line.variant_id} onChange={(event) => { const variant = lineVariants.find((item) => text(item.id) === event.target.value); updatePurchaseLine(index, { variant_id: event.target.value, unit_price: text(variant?.purchase_price, line.unit_price) }); }}><option value="">کالای پایه</option>{lineVariants.map((variant) => <option key={text(variant.id)} value={text(variant.id)}>{text(variant.variant_name ?? variant.name)}{text(variant.sku) ? ` (${text(variant.sku)})` : ""}</option>)}</select></label>
               <label className="text-[10px] text-slate-500">تعداد<input className={`${field} mt-1`} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updatePurchaseLine(index, { quantity: event.target.value })}/></label>
               <label className="text-[10px] text-slate-500">قیمت خرید واحد<input className={`${field} mt-1`} required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updatePurchaseLine(index, { unit_price: event.target.value })}/></label>

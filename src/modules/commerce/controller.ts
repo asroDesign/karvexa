@@ -54,7 +54,8 @@ function calculateInvoiceAmounts<T extends { quantity: string; unit_price: strin
   headerTax: string,
   shipping: string,
   otherCosts: string,
-  forceTaxOverride = false
+  forceTaxOverride = false,
+  roundingAdjustment = "0.00"
 ) {
   let subtotal = BigInt(0);
   let lineDiscountTotal = BigInt(0);
@@ -90,7 +91,7 @@ function calculateInvoiceAmounts<T extends { quantity: string; unit_price: strin
       allocatedTax = addDec(allocatedTax, lineTax);
     }
   }
-  const total = addDec(subDec(addDec(subtotal, taxTotal), discountTotal), addDec(shipping, otherCosts));
+  const total = addDec(subDec(addDec(subtotal, taxTotal), discountTotal), addDec(addDec(shipping, otherCosts), roundingAdjustment));
   if (!isPositiveDec(total)) throw new ApiError(422, "INVOICE_TOTAL_INVALID", "مبلغ نهایی فاکتور باید بزرگ‌تر از صفر باشد.");
   return {
     subtotal: formatDecimal(subtotal, 2),
@@ -149,6 +150,7 @@ const invoiceCreateSchema = z.object({
   tax_calculation_mode: z.enum(["AUTO", "OVERRIDE"]).default("AUTO"),
   shipping_cost: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
   other_costs: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
+  rounding_adjustment: z.string().regex(/^-?\d+(\.\d{1,2})?$/).default("0.00"),
   related_document_id: z.string().uuid().nullable().optional(),
   related_document_type: z.string().max(40).nullable().optional(),
   receipt_url: z.string().nullable().optional(),
@@ -241,6 +243,7 @@ export async function handleCommerceRoutes(
         tax_total: inv.taxAmount,
         shipping_cost: inv.shippingCost,
         other_costs: inv.otherCosts,
+        rounding_adjustment: inv.roundingAdjustment,
         grand_total: inv.totalAmount,
         paid_amount: inv.paidAmount,
         remaining_amount: inv.remainingAmount === "0.00" && inv.paidAmount === "0.00" ? inv.totalAmount : inv.remainingAmount,
@@ -272,7 +275,7 @@ export async function handleCommerceRoutes(
       const supplierId = body.supplier_id || body.contact_id;
       if (!supplierId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه تأمین‌کننده (supplier_id) الزامی است.");
 
-      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE");
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE", body.rounding_adjustment);
       const lineItems = totals.lineItems;
       const [policy] = await db
         .select()
@@ -299,6 +302,7 @@ export async function handleCommerceRoutes(
             taxAmount: totals.taxTotal,
             shippingCost: body.shipping_cost,
             otherCosts: body.other_costs,
+            roundingAdjustment: body.rounding_adjustment,
             totalAmount: totals.total,
             remainingAmount: totals.total,
             status: "DRAFT",
@@ -595,6 +599,7 @@ export async function handleCommerceRoutes(
         tax_total: inv.taxAmount,
         shipping_cost: inv.shippingCost,
         other_costs: inv.otherCosts,
+        rounding_adjustment: inv.roundingAdjustment,
         grand_total: inv.totalAmount,
         paid_amount: inv.paidAmount,
         remaining_amount: inv.remainingAmount === "0.00" && inv.paidAmount === "0.00" ? inv.totalAmount : inv.remainingAmount,
@@ -626,7 +631,7 @@ export async function handleCommerceRoutes(
       const customerId = body.customer_id || body.contact_id;
       if (!customerId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه مشتری (customer_id) الزامی است.");
 
-      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE");
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE", body.rounding_adjustment);
       const lineItems = totals.lineItems;
       const [policy] = await db
         .select()
@@ -654,6 +659,7 @@ export async function handleCommerceRoutes(
             taxAmount: totals.taxTotal,
             shippingCost: body.shipping_cost,
             otherCosts: body.other_costs,
+            roundingAdjustment: body.rounding_adjustment,
             totalAmount: totals.total,
             remainingAmount: totals.total,
             status: "DRAFT",

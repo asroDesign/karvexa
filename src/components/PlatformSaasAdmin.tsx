@@ -122,6 +122,7 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
             otp_template_id: String(p.otp_template_id || ""),
             invoice_template_id: String(p.invoice_template_id || ""),
             cheque_template_id: String(p.cheque_template_id || ""),
+            extra_config: (p.extra_config ?? {}) as Record<string, unknown>,
           };
         }
         setSmsDrafts(draftMap);
@@ -659,7 +660,7 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
                       className="w-full glass-input px-3 py-2 font-mono text-left"
                     />
                     {isSmsIr && <div className="mt-2 space-y-2">
-                      <p className="text-[10px] leading-5 text-slate-500">ارسال پیامک تست عادی از Bulk API و همین شناسه استفاده می‌کند؛ OTP دارای TemplateId از مسیر Verify ارسال می‌شود. دریافت خطوط مجاز پیامکی نمی‌فرستد.</p>
+                      <p className="text-[10px] leading-5 text-slate-500">آزمون SMS.ir و OTP از قالب Verify استفاده می‌کنند. شناسه خط برای ارسال پیامک‌های عادی است؛ دریافت خطوط مجاز پیامکی نمی‌فرستد.</p>
                       <button type="button" disabled={lineLookup?.loading} onClick={() => void loadSmsIrLines(code)} className="rounded-lg border border-violet-200 px-3 py-1.5 text-[10px] font-semibold text-violet-700 disabled:opacity-50">
                         {lineLookup?.loading ? "در حال دریافت خطوط…" : "دریافت خطوط مجاز از SMS.ir"}
                       </button>
@@ -689,6 +690,21 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
                       className="w-full glass-input px-3 py-2 font-mono text-left"
                     />
                   </div>
+                  {isSmsIr && <div>
+                    <label className="block font-medium mb-1">نام پارامتر کد در قالب Verify</label>
+                    <input
+                      dir="ltr"
+                      value={String(((draft.extra_config as Record<string, unknown> | undefined)?.otp_param_name) ?? "CODE")}
+                      onChange={(e) => setSmsDrafts((prev) => ({
+                        ...prev,
+                        [code]: {
+                          ...draft,
+                          extra_config: { ...((draft.extra_config as Record<string, unknown> | undefined) ?? {}), otp_param_name: e.target.value },
+                        },
+                      }))}
+                      className="w-full glass-input px-3 py-2 font-mono text-left"
+                    />
+                  </div>}
                   <div>
                     <label className="block font-medium mb-1">الگوی ارسال فاکتور (اختیاری)</label>
                     <input
@@ -732,6 +748,7 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
             <Send className="h-4 w-4 text-emerald-600" />
             <span>ارسال پیامک آزمایشی (تست درگاه SMS.ir / Kavenegar)</span>
           </h3>
+          {testSmsForm.provider === "SMS_IR" && <p className="rounded-lg bg-teal-50 px-3 py-2 text-[11px] text-teal-800">آزمون SMS.ir از قالب Verify و شناسهٔ قالب OTP ثبت‌شده استفاده می‌کند و یک کد ۶ رقمی می‌فرستد.</p>}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5">
             <select
               value={testSmsForm.provider}
@@ -751,6 +768,8 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
             />
             <input
               required
+              disabled={testSmsForm.provider === "SMS_IR"}
+              placeholder={testSmsForm.provider === "SMS_IR" ? "متن و پارامتر از قالب Verify گرفته می‌شود" : undefined}
               value={testSmsForm.message}
               onChange={(e) => setTestSmsForm({ ...testSmsForm, message: e.target.value })}
               className="md:col-span-4 glass-input px-3 py-2"

@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Plus, Search, X } from "lucide-react";
+import { QuickAddProductModal } from "@/components/QuickAddProductModal";
 
 type ProductRow = Record<string, unknown>;
 
@@ -12,23 +13,32 @@ export function ProductPickerModal({
   value,
   onChange,
   placeholder = "انتخاب کالا یا خدمت",
+  organizationId,
+  onProductCreated,
+  onToast,
 }: {
   products: ProductRow[];
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  organizationId?: string | null;
+  onProductCreated?: (product: ProductRow) => void;
+  onToast?: (message: string, type?: "success" | "error") => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const selected = products.find((product) => valueOf(product.id) === value);
+  const [createdProducts, setCreatedProducts] = useState<ProductRow[]>([]);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const allProducts = useMemo(() => [...createdProducts.filter((created) => !products.some((product) => valueOf(product.id) === valueOf(created.id))), ...products], [createdProducts, products]);
+  const selected = allProducts.find((product) => valueOf(product.id) === value);
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("fa");
-    if (!query) return products;
-    return products.filter((product) =>
+    if (!query) return allProducts;
+    return allProducts.filter((product) =>
       `${valueOf(product.name)} ${valueOf(product.sku ?? product.code)} ${valueOf(product.barcode)} ${valueOf(product.unit_name)}`
         .toLocaleLowerCase("fa").includes(query)
     );
-  }, [products, search]);
+  }, [allProducts, search]);
 
   return <>
     <button
@@ -55,6 +65,9 @@ export function ProductPickerModal({
             <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} className="w-full border-0 py-2.5 text-xs outline-none" placeholder="جستجو در کالاها" />
           </label>
         </div>
+        {organizationId && <div className="border-b border-slate-100 px-3 py-2">
+          <button type="button" onClick={() => setShowQuickAdd(true)} className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-emerald-300 bg-emerald-50 px-3 py-2.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"><Plus className="h-4 w-4"/>افزودن سریع محصول</button>
+        </div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {filtered.map((product) => {
             const id = valueOf(product.id);
@@ -67,5 +80,17 @@ export function ProductPickerModal({
         </div>
       </section>
     </div>}
+    {showQuickAdd && <QuickAddProductModal
+      organizationId={organizationId ?? null}
+      onClose={() => setShowQuickAdd(false)}
+      onToast={onToast}
+      onCreated={(product) => {
+        setCreatedProducts((current) => [product, ...current.filter((item) => valueOf(item.id) !== valueOf(product.id))]);
+        onProductCreated?.(product);
+        onChange(valueOf(product.id));
+        setShowQuickAdd(false);
+        setOpen(false);
+      }}
+    />}
   </>;
 }

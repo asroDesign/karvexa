@@ -33,7 +33,8 @@ import {
 } from "@/lib/format";
 import { currentJalaliDate } from "@/lib/jalali";
 import { JalaliDatePicker } from "@/components/JalaliDatePicker";
-import { ProductPickerModal } from "@/components/ProductPickerModal";
+import { QuickAddProductModal } from "@/components/QuickAddProductModal";
+import { SalesInvoiceComposer } from "@/components/SalesInvoiceComposer";
 import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
 import { GlassDashboard } from "./GlassDashboard";
 import { UserAccessSettings } from "./UserAccessSettings";
@@ -135,14 +136,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   const [transfers, setTransfers] = useState<Array<Record<string, unknown>>>([]);
   const [counts, setCounts] = useState<Array<Record<string, unknown>>>([]);
   const [productsList, setProductsList] = useState<Array<Record<string, unknown>>>([]);
-  const [countForm, setCountForm] = useState({
-    warehouse_id: "",
-    product_id: "",
-    counted_qty: "",
-    count_date_jalali: currentJalaliDate(),
-    notes: "انبارگردانی دوره‌ای",
-  });
-
   // Catalog
   const [catalogMeta, setCatalogMeta] = useState<{
     categories: Array<Record<string, unknown>>;
@@ -170,6 +163,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     barcode: "",
   });
   const [showProductCreateModal, setShowProductCreateModal] = useState(false);
+  const [showQuickProductModal, setShowQuickProductModal] = useState(false);
 
   // Contacts
   const [contactsList, setContactsList] = useState<Array<Record<string, unknown>>>([]);
@@ -184,15 +178,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   // Commerce (Sales & Purchasing)
   const [salesList, setSalesList] = useState<Array<Record<string, unknown>>>([]);
   const [purchasesList, setPurchasesList] = useState<Array<Record<string, unknown>>>([]);
-  const [saleForm, setSaleForm] = useState({
-    customer_id: "",
-    warehouse_id: "",
-    product_id: "",
-    quantity: "1.0000",
-    unit_price: "",
-    document_date_jalali: currentJalaliDate(),
-  });
-
   // Treasury, Cheques, Consignments
   const [treasuryAccounts, setTreasuryAccounts] = useState<Array<Record<string, unknown>>>([]);
   const [treasuryTxs, setTreasuryTxs] = useState<Array<Record<string, unknown>>>([]);
@@ -265,13 +250,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           setTransfers(trs);
           setCounts(cnts);
           setProductsList(prods);
-          if (whs.length > 0) {
-            setCountForm((p) => ({
-              ...p,
-              warehouse_id: String(whs[0].id),
-              product_id: String(prods[0]?.id ?? ""),
-            }));
-          }
         } else if (activeTab === "catalog") {
           const [prods, cats, brds, unts] = await Promise.all([
             apiFetch<Array<Record<string, unknown>>>("/api/v1/products?per_page=100", { organizationId: orgId }),
@@ -301,15 +279,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
           setContactsList(cList);
           setWarehousesList(wList);
           setProductsList(prList);
-          if (cList.length > 0 && !saleForm.customer_id) {
-            setSaleForm((p) => ({
-              ...p,
-              customer_id: String(cList[0].id),
-              warehouse_id: String(wList[0]?.id ?? ""),
-              product_id: String(prList[0]?.id ?? ""),
-              unit_price: String(prList[0]?.sale_price ?? ""),
-            }));
-          }
+
         } else if (activeTab === "treasury") {
           const [accs, txs, chqs, cons] = await Promise.all([
             apiFetch<Array<Record<string, unknown>>>("/api/v1/treasury/accounts", { organizationId: orgId }),
@@ -435,26 +405,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
     }
   }
 
-  async function executeStockCount(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await apiFetch("/api/v1/inventory/counts", {
-        method: "POST",
-        organizationId: orgId,
-        body: JSON.stringify({
-          warehouse_id: countForm.warehouse_id,
-          count_date_jalali: countForm.count_date_jalali,
-          notes: countForm.notes,
-          items: [{ product_id: countForm.product_id, counted_qty: countForm.counted_qty }],
-        }),
-      });
-      onToast("انبارگردانی تایید و سند تعدیل اختلاف موجودی به صورت خودکار در Stock Ledger ثبت شد.");
-      loadTab("inventory");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در انبارگردانی", "error");
-    }
-  }
-
   async function lookupBarcode() {
     try {
       const res = await apiFetch<Record<string, unknown>>(
@@ -505,34 +455,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
       loadTab("contacts");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در ثبت طرف‌حساب", "error");
-    }
-  }
-
-  async function createDraftSale(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await apiFetch("/api/v1/sales", {
-        method: "POST",
-        organizationId: orgId,
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({
-          client_document_id: crypto.randomUUID(),
-          customer_id: saleForm.customer_id,
-          warehouse_id: saleForm.warehouse_id,
-          document_date_jalali: saleForm.document_date_jalali,
-          items: [
-            {
-              product_id: saleForm.product_id,
-              quantity: saleForm.quantity,
-              unit_price: saleForm.unit_price,
-            },
-          ],
-        }),
-      });
-      onToast("پیش‌نویس فاکتور فروش ایجاد شد. برای صدور سند انبار و حسابداری آن را تایید کنید.");
-      loadTab("commerce");
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در ایجاد فاکتور", "error");
     }
   }
 
@@ -1211,121 +1133,6 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         {/* 3. INVENTORY */}
         {tab === "inventory" && (
           <div className="space-y-5">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {/* Stock Count & Variance Adjustment */}
-              <form onSubmit={executeStockCount} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <ClipboardCheck className="h-4 w-4 text-indigo-600" />
-                  <span>انبارگردانی و صدور سند تعدیل اختلاف (Stock Count)</span>
-                </h3>
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <label className="block text-slate-600 mb-1">انبار</label>
-                    <select
-                      value={countForm.warehouse_id}
-                      onChange={(e) => setCountForm({ ...countForm, warehouse_id: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                    >
-                      {warehousesList.map((w) => (
-                        <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-slate-600 mb-1">کالا</label>
-                    <ProductPickerModal products={productsList} value={countForm.product_id} onChange={(productId) => setCountForm({ ...countForm, product_id: productId })} />
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-slate-600 mb-1">موجودی واقعی شمارش‌شده</label>
-                    <input
-                      dir="ltr"
-                      required
-                      value={countForm.counted_qty}
-                      onChange={(e) => setCountForm({ ...countForm, counted_qty: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-left font-mono"
-                    />
-                  </div>
-                </div>
-                <label className="block text-xs text-slate-600">تاریخ انبارگردانی شمسی
-                  <JalaliDatePicker className="mt-1" value={countForm.count_date_jalali} onChange={(value) => setCountForm({ ...countForm, count_date_jalali: value })} />
-                </label>
-                <button type="submit" className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white py-2 text-xs font-medium cursor-pointer">
-                  تایید شمارش و ثبت سند تعدیل اختلاف در Ledger
-                </button>
-              </form>
-            </div>
-
-            {/* Live Stock Valuation from Stock Ledger */}
-            {stockData && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                  <h3 className="text-sm font-bold text-slate-900">موجودی لحظه‌ای و بهای تمام‌شده (Stock Ledger)</h3>
-                  <span className="text-xs font-bold text-teal-800 bg-teal-50 px-3 py-1 rounded-full tabular-nums">
-                    ارزش کل انبارها: {formatIrr(stockData.total_valuation as string)} ریال
-                  </span>
-                </div>
-                <table className="w-full text-xs text-right">
-                  <thead className="bg-slate-50 border-b border-slate-200">
-                    <tr>
-                      <th className="px-3 py-2.5">انبار</th>
-                      <th className="px-3 py-2.5">کالا</th>
-                      <th className="px-3 py-2.5">روش ارزش‌گذاری</th>
-                      <th className="px-3 py-2.5">موجودی فعلی</th>
-                      <th className="px-3 py-2.5">بهای واحد میانگین</th>
-                      <th className="px-3 py-2.5">ارزش کل (ریال)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 tabular-nums">
-                    {((stockData.balances as Array<Record<string, unknown>>) ?? []).map((b, i) => (
-                      <tr key={i}>
-                        <td className="px-3 py-2 font-medium">{String(b.warehouse_name)}</td>
-                        <td className="px-3 py-2">{String(b.product_name)} ({String(b.product_sku)})</td>
-                        <td className="px-3 py-2 font-mono text-[11px]">{String(b.costing_method)}</td>
-                        <td className="px-3 py-2 font-bold text-slate-900">{formatQty(b.on_hand_qty as string)}</td>
-                        <td className="px-3 py-2">{formatIrr(b.avg_unit_cost as string)}</td>
-                        <td className="px-3 py-2 font-semibold">{formatIrr(b.total_value as string)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Recent Stock Ledger Movements */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
-              <h3 className="text-sm font-bold text-slate-900 mb-3">
-                کاردکس گردش موجودی (Stock Ledger) — {transfers.length} انتقال • {counts.length} انبارگردانی
-              </h3>
-              <table className="w-full text-xs text-right">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="px-3 py-2.5">شماره سند / نوع</th>
-                    <th className="px-3 py-2.5">انبار / کالا</th>
-                    <th className="px-3 py-2.5">علت حرکت</th>
-                    <th className="px-3 py-2.5">تغییر مقدار</th>
-                    <th className="px-3 py-2.5">مانده بعد</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 tabular-nums">
-                  {movements.slice(0, 20).map((m) => (
-                    <tr key={String(m.id)}>
-                      <td className="px-3 py-2 font-mono text-[11px]">
-                        {String(m.document_number)} • {String(m.document_type)}
-                      </td>
-                      <td className="px-3 py-2">
-                        {String(m.warehouse_name)} — {String(m.product_name)}
-                      </td>
-                      <td className="px-3 py-2 text-slate-600">{String(m.reason)}</td>
-                      <td className={`px-3 py-2 font-bold ${Number(m.quantity_delta) >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
-                        {Number(m.quantity_delta) >= 0 ? "+" : ""}
-                        {formatQty(m.quantity_delta as string)}
-                      </td>
-                      <td className="px-3 py-2 font-semibold">{formatQty(m.balance_after_qty as string)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
             <InventoryParityPanel orgId={orgId} onToast={onToast} />
           </div>
         )}
@@ -1370,7 +1177,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               {/* Create Product */}
               <div className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-5">
                 <div><h3 className="text-sm font-bold text-slate-900">افزودن کالا یا خدمت</h3><p className="mt-2 text-xs leading-6 text-slate-500">فرم کامل کاتالوگ شامل نوع، واحد، دسته‌بندی، قیمت‌ها و کنترل موجودی را باز کنید.</p></div>
-                <button type="button" onClick={() => setShowProductCreateModal(true)} className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-medium text-white"><Plus className="h-4 w-4"/>افزودن کالای جدید</button>
+                <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2"><button type="button" onClick={() => setShowQuickProductModal(true)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-medium text-white"><Plus className="h-4 w-4"/>افزودن سریع مطابق اپلیکیشن</button><button type="button" onClick={() => setShowProductCreateModal(true)} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-medium text-slate-700"><Plus className="h-4 w-4"/>فرم کامل کالا / خدمت</button></div>
               </div>
               {showProductCreateModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/45 p-3" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowProductCreateModal(false); }}>
                 <form onSubmit={createProduct} className="max-h-[92vh] w-full max-w-2xl space-y-3 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
@@ -1396,6 +1203,10 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               </div>}
             </div>
 
+            {showQuickProductModal && <QuickAddProductModal organizationId={orgId} onClose={() => setShowQuickProductModal(false)} onToast={onToast} onCreated={(product) => {
+              setProductsList((current) => [product, ...current.filter((item) => String(item.id) !== String(product.id))]);
+              void loadTab("catalog");
+            }} />}
             <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
               <table className="w-full text-xs text-right">
                 <thead className="bg-slate-50 border-b border-slate-200">
@@ -1507,48 +1318,8 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
         {/* 6. COMMERCE (SALES & PURCHASING) */}
         {tab === "commerce" && (
           <div className="space-y-5">
-            <form onSubmit={createDraftSale} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
-              <h3 className="text-sm font-bold text-slate-900">ثبت فاکتور فروش جدید (پیش‌نویس ← تایید اتمیک انبار + حسابداری)</h3>
-              <div className="grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
-                <select
-                  value={saleForm.customer_id}
-                  onChange={(e) => setSaleForm({ ...saleForm, customer_id: e.target.value })}
-                  className="rounded-xl border border-slate-200 px-3 py-2"
-                >
-                  {contactsList.map((c) => (
-                    <option key={String(c.id)} value={String(c.id)}>{String(c.display_name)}</option>
-                  ))}
-                </select>
-                <select
-                  value={saleForm.warehouse_id}
-                  onChange={(e) => setSaleForm({ ...saleForm, warehouse_id: e.target.value })}
-                  className="rounded-xl border border-slate-200 px-3 py-2"
-                >
-                  {warehousesList.map((w) => (
-                    <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
-                  ))}
-                </select>
-                <ProductPickerModal
-                  products={productsList}
-                  value={saleForm.product_id}
-                  onChange={(productId) => {
-                    const product = productsList.find((item) => String(item.id) === productId);
-                    setSaleForm({ ...saleForm, product_id: productId, unit_price: String(product?.sale_price ?? "") });
-                  }}
-                />
-                <input
-                  dir="ltr"
-                  value={saleForm.quantity}
-                  onChange={(e) => setSaleForm({ ...saleForm, quantity: e.target.value })}
-                  placeholder="تعداد"
-                  className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
-                />
-                <label className="text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={saleForm.document_date_jalali} onChange={(value) => setSaleForm({ ...saleForm, document_date_jalali: value })}/></label>
-                <button type="submit" className="rounded-xl bg-emerald-700 text-white py-2 font-medium cursor-pointer">
-                  ایجاد پیش‌نویس فروش
-                </button>
-              </div>
-            </form>
+            <SalesInvoiceComposer orgId={orgId} onToast={onToast} onRefresh={() => loadTab("commerce")} />
+            <CommerceParityPanel orgId={orgId} contacts={contactsList} products={productsList} warehouses={warehousesList} sales={salesList} purchases={purchasesList} onToast={onToast} onRefresh={() => loadTab("commerce")} />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
               <div className="bg-white rounded-2xl border border-slate-200 p-5">
@@ -1615,7 +1386,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                 </div>
               </div>
             </div>
-            <CommerceParityPanel orgId={orgId} contacts={contactsList} products={productsList} warehouses={warehousesList} sales={salesList} purchases={purchasesList} onToast={onToast} onRefresh={() => loadTab("commerce")} />
+
           </div>
         )}
 

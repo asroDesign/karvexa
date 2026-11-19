@@ -168,30 +168,42 @@ export async function sendSmsViaGateway(params: {
       const baseUrl = String(extra.base_url || "https://api.sms.ir/v1").replace(/\/$/, "");
       const paramName = String(extra.otp_param_name || "CODE");
 
-      if (params.otpCode && config.otpTemplateId) {
-        // Official SMS.ir Verify API
-        const res = await fetch(`${baseUrl}/send/verify`, {
+      if (params.purpose === "TEST" && !params.otpCode) {
+        throw new Error("آزمون SMS.ir باید از قالب Verify ارسال شود؛ کد آزمایشی در درخواست وجود ندارد.");
+      }
+      if (params.otpCode && !/^\d+$/.test(config.otpTemplateId)) {
+        throw new Error("برای ارسال Verify در SMS.ir یک شناسه عددی قالب OTP در تنظیمات ثبت کنید.");
+      }
+
+      if (params.otpCode) {
+        // Match Organo: SMS.ir Verify endpoint, X-API-KEY and {mobile, templateId, parameters}.
+        const res = await fetch("https://api.sms.ir/v1/send/verify", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Accept: "application/json",
-            "X-API-KEY": config.apiKey,
+            Accept: "text/plain",
+            "x-api-key": config.apiKey,
           },
           body: JSON.stringify({
             mobile: normalizedMobile,
-            templateId: Number(config.otpTemplateId) || config.otpTemplateId,
+            templateId: Number(config.otpTemplateId),
             parameters: [{ name: paramName, value: params.otpCode }],
           }),
+          signal: AbortSignal.timeout(8_000),
+          cache: "no-store",
         });
-        const data = (await res.json().catch(() => ({}))) as {
-          status?: number;
-          message?: string;
-          data?: { messageId?: number | string };
-        };
-        if (!res.ok || (data.status !== undefined && data.status !== 1)) {
-          throw new Error(data.message || `SMS.ir HTTP ${res.status}`);
+        const rawResponse = (await res.text()).slice(0, 500);
+        const data = (() => {
+          try {
+            return JSON.parse(rawResponse) as { status?: number; message?: string; data?: { messageId?: number | string } };
+          } catch {
+            return null;
+          }
+        })();
+        if (!res.ok || (data?.status !== undefined && Number(data.status) !== 1)) {
+          throw new Error(data?.message || rawResponse || "SMS.ir Verify HTTP " + res.status);
         }
-        providerMessageId = String(data.data?.messageId ?? `smsir-${Date.now()}`);
+        providerMessageId = String(data?.data?.messageId ?? "smsir-" + Date.now());
       } else {
         // Match Organо's working direct-message method: POST /v1/send.
         // SMS.ir accepts the sender line as a number; keep the same default line

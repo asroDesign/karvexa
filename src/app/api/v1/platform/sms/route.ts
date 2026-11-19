@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { randomInt } from "node:crypto";
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
@@ -162,11 +163,18 @@ export async function POST(req: NextRequest) {
     const admin = await requirePlatformAdmin(req, "platform.settings.manage");
     const body = testSmsSchema.parse(await req.json());
 
+    const providerRows = body.provider ? [] : await db.select().from(smsSettings);
+    const selectedProvider = body.provider ?? (
+      providerRows.find((row) => row.isDefault && row.isActive)?.provider
+      ?? providerRows.find((row) => row.isActive)?.provider
+      ?? providerRows[0]?.provider) as "SMS_IR" | "KAVENEGAR" | undefined;
+    const verifyCode = selectedProvider === "SMS_IR" ? String(randomInt(100000, 1_000_000)) : undefined;
     const result = await sendSmsViaGateway({
       mobile: body.mobile,
       purpose: "TEST",
-      message: body.message,
-      provider: body.provider,
+      message: verifyCode ? "کد آزمایشی ورود Karvexa: " + verifyCode : body.message,
+      ...(verifyCode ? { otpCode: verifyCode } : {}),
+      provider: selectedProvider,
     });
 
     await recordAuditLog({
@@ -177,7 +185,7 @@ export async function POST(req: NextRequest) {
       entityType: "SMS_GATEWAY",
       entityId: result.provider,
       ipAddress: admin.ipAddress,
-      metadata: { provider: result.provider, sandbox: result.sandbox },
+      metadata: { provider: result.provider, sandbox: result.sandbox, delivery_method: result.provider === "SMS_IR" ? "VERIFY" : "STANDARD" },
     });
 
     return ok(result);

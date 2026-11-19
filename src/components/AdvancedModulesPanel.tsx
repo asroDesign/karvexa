@@ -15,7 +15,6 @@ import {
   Printer,
   RefreshCw,
   Repeat,
-  ShoppingCart,
   Sparkles,
   UserPlus,
   Wallet,
@@ -34,6 +33,7 @@ import {
 import { apiFetch, formatIrr, formatQty } from "@/lib/format";
 import { JalaliDatePicker, JalaliMonthPicker } from "@/components/JalaliDatePicker";
 import { ProductPickerModal } from "@/components/ProductPickerModal";
+import { SalesInvoiceComposer } from "@/components/SalesInvoiceComposer";
 import { currentJalaliDate } from "@/lib/jalali";
 
 export type AdvancedSubTab =
@@ -101,19 +101,6 @@ export function AdvancedModulesPanel({
   const [productsList, setProductsList] = useState<Array<Record<string, unknown>>>([]);
   const [salesList, setSalesList] = useState<Array<Record<string, unknown>>>([]);
   const [quotationsList, setQuotationsList] = useState<Array<Record<string, unknown>>>([]);
-  const [mixedForm, setMixedForm] = useState({
-    customer_id: "",
-    warehouse_id: "",
-    product_id: "",
-    quantity: "",
-    unit_price: "",
-    discount_total: "0.00",
-    tax_total: "0.00",
-    cash_amount: "",
-    pos_amount: "",
-    document_date_jalali: currentJalaliDate(),
-  });
-
   // Variants & Smart Replenishment state
   const [variantsData, setVariantsData] = useState<Record<string, unknown> | null>(null);
   const [suggestions, setSuggestions] = useState<Array<Record<string, unknown>>>([]);
@@ -192,14 +179,6 @@ export function AdvancedModulesPanel({
         setSalesList(sList);
         setQuotationsList(qList);
         setBizAccounts(fas);
-        if (cList.length > 0 && !mixedForm.customer_id) {
-          setMixedForm((p) => ({
-            ...p,
-            customer_id: String(cList[0].id),
-            warehouse_id: String(wList[0]?.id ?? ""),
-            product_id: String(pList[0]?.id ?? ""),
-          }));
-        }
       } else if (activeTab === "variants_replenish") {
         const [vRes, sRes, pList, wList, cList] = await Promise.all([
           apiFetch<Record<string, unknown>>("/api/v1/variants", { organizationId: orgId }),
@@ -337,74 +316,6 @@ export function AdvancedModulesPanel({
       loadData();
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در ثبت سریع", "error");
-    }
-  }
-
-  async function handleCreateAndConfirmMixedSale(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      const draft = await apiFetch<{ id: string }>("/api/v1/sales", {
-        method: "POST",
-        organizationId: orgId,
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({
-          client_document_id: crypto.randomUUID(),
-          customer_id: mixedForm.customer_id,
-          warehouse_id: mixedForm.warehouse_id,
-          document_date_jalali: mixedForm.document_date_jalali,
-          discount_total: mixedForm.discount_total,
-          tax_total: mixedForm.tax_total,
-          items: [
-            {
-              product_id: mixedForm.product_id,
-              quantity: mixedForm.quantity,
-              unit_price: mixedForm.unit_price,
-            },
-          ],
-        }),
-      });
-
-      const allocations: Array<{ payment_method: string; amount: string }> = [];
-      if (Number(mixedForm.cash_amount) > 0) {
-        allocations.push({ payment_method: "CASH", amount: mixedForm.cash_amount });
-      }
-      if (Number(mixedForm.pos_amount) > 0) {
-        allocations.push({ payment_method: "POS", amount: mixedForm.pos_amount });
-      }
-
-      await apiFetch(`/api/v1/sales/${draft.id}/confirm`, {
-        method: "POST",
-        organizationId: orgId,
-        body: JSON.stringify({ payment_allocations: allocations }),
-      });
-      onToast("فاکتور فروش با پرداخت ترکیبی (نقد + کارت‌خوان + نسیه)، کسر موجودی، سند دوبل و امتیاز وفاداری نهایی شد!");
-      loadData();
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در ثبت فروش ترکیبی", "error");
-    }
-  }
-
-  async function handleCreateQuotation() {
-    try {
-      await apiFetch("/api/v1/quotations", {
-        method: "POST",
-        organizationId: orgId,
-        body: JSON.stringify({
-          customer_id: mixedForm.customer_id,
-          warehouse_id: mixedForm.warehouse_id,
-          items: [
-            {
-              product_id: mixedForm.product_id,
-              quantity: mixedForm.quantity,
-              unit_price: mixedForm.unit_price,
-            },
-          ],
-        }),
-      });
-      onToast("پیش‌فاکتور (Quotation) بدون تاثیر بر موجودی و حسابداری صادر شد.");
-      loadData();
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : "خطا در صدور پیش‌فاکتور", "error");
     }
   }
 
@@ -824,108 +735,7 @@ export function AdvancedModulesPanel({
       {/* 3. FAST MIXED-PAYMENT SALES INVOICE + QUOTATIONS + PDF */}
       {activeTab === "mixed_sales" && (
         <div className="space-y-5">
-          <form onSubmit={handleCreateAndConfirmMixedSale} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <ShoppingCart className="h-4 w-4 text-emerald-600" />
-                <span>صدور سریع فاکتور فروش با پرداخت ترکیبی (نقد + کارت‌خوان POS + نسیه)</span>
-              </h3>
-              <button
-                type="button"
-                onClick={handleCreateQuotation}
-                className="rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 px-3 py-1.5 font-medium cursor-pointer"
-              >
-                ذخیره به عنوان پیش‌فاکتور (Quotation)
-              </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-slate-600 mb-1">۱. انتخاب مشتری</label>
-                <select
-                  value={mixedForm.customer_id}
-                  onChange={(e) => setMixedForm({ ...mixedForm, customer_id: e.target.value })}
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                >
-                  {contactsList.map((c) => (
-                    <option key={String(c.id)} value={String(c.id)}>
-                      {String(c.display_name)} (مانده: {formatIrr(c.running_balance as string)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-slate-600 mb-1">۲. انبار و کالا</label>
-                <ProductPickerModal products={productsList} value={mixedForm.product_id} onChange={(productId) => setMixedForm({ ...mixedForm, product_id: productId })} />
-                <span className="mt-1 block text-[10px] text-slate-500">موجودی کل: {formatQty(String(productsList.find((item) => String(item.id) === mixedForm.product_id)?.total_on_hand_qty ?? "0"))}</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-slate-600 mb-1">تعداد</label>
-                  <input
-                    dir="ltr"
-                    value={mixedForm.quantity}
-                    onChange={(e) => setMixedForm({ ...mixedForm, quantity: e.target.value })}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-600 mb-1">قیمت واحد</label>
-                  <input
-                    dir="ltr"
-                    value={mixedForm.unit_price}
-                    onChange={(e) => setMixedForm({ ...mixedForm, unit_price: e.target.value })}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
-                  />
-                </div>
-              </div>
-            </div>
-            <label className="block max-w-sm text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={mixedForm.document_date_jalali} onChange={(value) => setMixedForm({ ...mixedForm, document_date_jalali: value })}/></label>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
-              <div>
-                <label className="block text-slate-600 mb-1">پرداخت نقدی (CASH)</label>
-                <input
-                  dir="ltr"
-                  value={mixedForm.cash_amount}
-                  onChange={(e) => setMixedForm({ ...mixedForm, cash_amount: e.target.value })}
-                  className="w-full rounded-xl border border-emerald-200 bg-emerald-50/30 px-3 py-2 font-mono text-left"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-600 mb-1">کارت‌خوان (POS)</label>
-                <input
-                  dir="ltr"
-                  value={mixedForm.pos_amount}
-                  onChange={(e) => setMixedForm({ ...mixedForm, pos_amount: e.target.value })}
-                  className="w-full rounded-xl border border-indigo-200 bg-indigo-50/30 px-3 py-2 font-mono text-left"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-600 mb-1">تخفیف / مالیات</label>
-                <div className="grid grid-cols-2 gap-1">
-                  <input
-                    dir="ltr"
-                    placeholder="تخفیف"
-                    value={mixedForm.discount_total}
-                    onChange={(e) => setMixedForm({ ...mixedForm, discount_total: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-2 py-2 font-mono text-left"
-                  />
-                  <input
-                    dir="ltr"
-                    placeholder="مالیات"
-                    value={mixedForm.tax_total}
-                    onChange={(e) => setMixedForm({ ...mixedForm, tax_total: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-2 py-2 font-mono text-left"
-                  />
-                </div>
-              </div>
-              <div className="flex flex-col justify-end">
-                <button type="submit" className="w-full rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white py-2.5 font-semibold cursor-pointer">
-                  تایید و ثبت پرداخت ترکیبی
-                </button>
-              </div>
-            </div>
-          </form>
+          <SalesInvoiceComposer orgId={orgId} onToast={onToast} onRefresh={() => { void loadData(); }} title="صدور سریع فاکتور فروش با پرداخت ترکیبی (نقد + کارت‌خوان POS + نسیه)" />
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-2.5 text-xs">
@@ -1005,7 +815,7 @@ export function AdvancedModulesPanel({
               <span>تعریف تنوع کالا (سایز/رنگ/مدل) + ثبت موجودی اول دوره مستقل در Stock Ledger</span>
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
-              <ProductPickerModal products={productsList} value={varForm.product_id} onChange={(productId) => setVarForm({ ...varForm, product_id: productId })} />
+              <ProductPickerModal products={productsList} value={varForm.product_id} organizationId={orgId} onToast={onToast} onProductCreated={(product) => setProductsList((current) => [product, ...current.filter((item) => String(item.id) !== String(product.id))])} onChange={(productId) => setVarForm({ ...varForm, product_id: productId })} />
               <input
                 value={varForm.variant_name}
                 onChange={(e) => setVarForm({ ...varForm, variant_name: e.target.value })}

@@ -427,6 +427,10 @@ export async function returnSalesInvoice(params: {
       isPositiveDec(parseDecimal(amount)) && isPositiveDec(invoiceSubtotal)
         ? mulDec(parseDecimal(amount), divDec(grossAmount, invoiceSubtotal))
         : BigInt(0);
+    const allocateSignedInvoiceAmount = (amount: string, grossAmount: bigint) =>
+      isPositiveDec(invoiceSubtotal)
+        ? mulDec(parseDecimal(amount), divDec(grossAmount, invoiceSubtotal))
+        : BigInt(0);
     const discountShare = subDec(
       allocateInvoiceAmount(inv.discountAmount, cumulativeGrossReturnTotal),
       allocateInvoiceAmount(inv.discountAmount, previousGrossReturnTotal)
@@ -435,7 +439,11 @@ export async function returnSalesInvoice(params: {
       allocateInvoiceAmount(inv.taxAmount, cumulativeGrossReturnTotal),
       allocateInvoiceAmount(inv.taxAmount, previousGrossReturnTotal)
     );
-    const revenueReturnTotal = subDec(grossReturnTotal, discountShare);
+    const roundingShare = subDec(
+      allocateSignedInvoiceAmount(inv.roundingAdjustment, cumulativeGrossReturnTotal),
+      allocateSignedInvoiceAmount(inv.roundingAdjustment, previousGrossReturnTotal)
+    );
+    const revenueReturnTotal = addDec(subDec(grossReturnTotal, discountShare), roundingShare);
     const returnGrandTotal = addDec(revenueReturnTotal, taxShare);
     if (!isPositiveDec(returnGrandTotal)) throw new ApiError(422, "RETURN_TOTAL_INVALID", "مبلغ برگشت پس از محاسبهٔ تخفیف و مالیات باید بزرگ‌تر از صفر باشد.");
 
@@ -1027,7 +1035,17 @@ export async function returnPurchaseInvoice(params: {
       : BigInt(0);
     const headerDiscountShare = subDec(headerDiscountAfter, headerDiscountBefore);
     const totalDiscountShare = addDec(lineDiscountShareTotal, headerDiscountShare);
-    const returnGrandTotal = addDec(subDec(grossPurchaseReturn, totalDiscountShare), returnTaxShareTotal);
+    const previousGrossPurchaseReturn = prevReturnItems.reduce((sum, item) => addDec(sum, parseDecimal(item.lineTotal)), BigInt(0));
+    const cumulativeGrossPurchaseReturn = addDec(previousGrossPurchaseReturn, grossPurchaseReturn);
+    const purchaseSubtotalForRounding = parseDecimal(inv.subtotal);
+    const allocatePurchaseRounding = (grossAmount: bigint) => isPositiveDec(purchaseSubtotalForRounding)
+      ? mulDec(parseDecimal(inv.roundingAdjustment), divDec(grossAmount, purchaseSubtotalForRounding))
+      : BigInt(0);
+    const roundingShare = subDec(
+      allocatePurchaseRounding(cumulativeGrossPurchaseReturn),
+      allocatePurchaseRounding(previousGrossPurchaseReturn)
+    );
+    const returnGrandTotal = addDec(addDec(subDec(grossPurchaseReturn, totalDiscountShare), returnTaxShareTotal), roundingShare);
     if (!isPositiveDec(returnGrandTotal)) throw new ApiError(422, "PURCHASE_RETURN_TOTAL_INVALID", "مبلغ برگشت خرید پس از محاسبهٔ تخفیف و مالیات باید بزرگ‌تر از صفر باشد.");
 
     const retDate = params.returnDate || new Date().toISOString().slice(0, 10);

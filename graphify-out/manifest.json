@@ -151,9 +151,9 @@
     "semantic_hash": "415c873451964a204c2f359b14ea27ec"
   },
   "src/app/api/v1/platform/sms/route.ts": {
-    "mtime": 1795103186.2563648,
-    "seen": 1795103302.146977,
-    "ast_hash": "4368fcde73cbb354323c93b04dc6a778",
+    "mtime": 1795107356.8016543,
+    "seen": 1795107703.446193,
+    "ast_hash": "1254bd7ab1b4184f0e2e189840496999",
     "semantic_hash": ""
   },
   "src/app/api/v1/platform/tickets/route.ts": {
@@ -217,9 +217,9 @@
     "semantic_hash": "cd2a0bece19933f3cd2aa0acdd6463ff"
   },
   "src/components/AdvancedModulesPanel.tsx": {
-    "mtime": 1795094901.6119514,
-    "seen": 1795096832.987803,
-    "ast_hash": "1306d73f25e893a79580feda3eeed014",
+    "mtime": 1795107839.3783185,
+    "seen": 1795107876.282474,
+    "ast_hash": "95dd2a44e75c8be7731d49fc77c0f10c",
     "semantic_hash": ""
   },
   "src/components/BusinessOsShell.tsx": {
@@ -247,9 +247,9 @@
     "semantic_hash": "ff756820a2e3b00562e5f6c9db8dd0a6"
   },
   "src/components/OrgWorkspace.tsx": {
-    "mtime": 1795100553.0372865,
-    "seen": 1795102158.4432142,
-    "ast_hash": "99ca9a936dea64ae28b5dead3906dce3",
+    "mtime": 1795107839.3791165,
+    "seen": 1795107876.282484,
+    "ast_hash": "54c4e951bee52bd3932e2a6812532e2d",
     "semantic_hash": ""
   },
   "src/components/PlatformAdminPortal.tsx": {
@@ -259,9 +259,9 @@
     "semantic_hash": "bac2479dfa8e93b9ae6bf0ff3a22e523"
   },
   "src/components/PlatformSaasAdmin.tsx": {
-    "mtime": 1795103330.344714,
-    "seen": 1795103358.236367,
-    "ast_hash": "085ad285980a36a2d7111caa8655a5f7",
+    "mtime": 1795107573.799049,
+    "seen": 1795107703.446224,
+    "ast_hash": "210961f0a20810be767db6518aeb9e9b",
     "semantic_hash": ""
   },
   "src/components/RichTextEditor.tsx": {
@@ -301,9 +301,9 @@
     "semantic_hash": "b9c5917edbf7edb1de14b9b4661f0adf"
   },
   "src/db/schema.ts": {
-    "mtime": 1795103563.0828724,
-    "seen": 1795103731.6970298,
-    "ast_hash": "0cf380a42ab50715ccde4ba7718268b1",
+    "mtime": 1795107209.6590714,
+    "seen": 1795107703.446246,
+    "ast_hash": "a1121538bf933f6424598d6a0eb8d670",
     "semantic_hash": ""
   },
   "src/db/seed-prompt05.ts": {
@@ -409,16 +409,16 @@
     "semantic_hash": "b780575497f5ef5517e18c16e86b3287"
   },
   "src/modules/commerce/controller.ts": {
-    "mtime": 1795097225.873052,
-    "seen": 1795097331.168418,
-    "ast_hash": "37e816492b591743940c09e43200ef5c",
+    "mtime": 1795107272.4168828,
+    "seen": 1795107703.446264,
+    "ast_hash": "996b5043359fac4b90ded3d574f256b2",
     "semantic_hash": ""
   },
   "src/modules/commerce/lifecycle.service.ts": {
-    "mtime": 1794996567.585306,
-    "seen": 1795024602.386849,
-    "ast_hash": "d77898dcaf7fc39b3709d6509d364fa5",
-    "semantic_hash": "d77898dcaf7fc39b3709d6509d364fa5"
+    "mtime": 1795107670.3249881,
+    "seen": 1795107703.446265,
+    "ast_hash": "c7476cea42d23a4f6d739a9687da0b42",
+    "semantic_hash": ""
   },
   "src/modules/commerce/service.ts": {
     "mtime": 1795088456.7927845,
@@ -511,9 +511,9 @@
     "semantic_hash": "77b3f8ae2afda3a3df5436e7c8d8bf43"
   },
   "src/modules/sms/service.ts": {
-    "mtime": 1795105211.7527199,
-    "seen": 1795105226.827807,
-    "ast_hash": "16b1ffab751ad88fbef0bc674f6db0cf",
+    "mtime": 1795107573.797454,
+    "seen": 1795107703.446282,
+    "ast_hash": "02c88c4c5612eaf43f0c87d53100785f",
     "semantic_hash": ""
   },
   "src/modules/subscription/controller.ts": {
@@ -901,9 +901,9 @@
     "semantic_hash": "fa38e782c4f127d137afb0f5faa6fbc4"
   },
   "src/components/BusinessParityPanels.tsx": {
-    "mtime": 1795103655.066937,
-    "seen": 1795103731.697006,
-    "ast_hash": "df189c060939fde513a17d8d0df57ec5",
+    "mtime": 1795107773.959942,
+    "seen": 1795107876.2824771,
+    "ast_hash": "9aca3fc584ec9df3f773eff1e45e2430",
     "semantic_hash": ""
   },
   "src/components/PwaRegistration.tsx": {
@@ -991,9 +991,9 @@
     "semantic_hash": "30b318ec54df9375138d6b0f04df6c6d"
   },
   "src/components/ProductPickerModal.tsx": {
-    "mtime": 1795093411.9424038,
-    "seen": 1795096832.9878159,
-    "ast_hash": "caba99d141fe5e53e3487989071d197a",
+    "mtime": 1795106140.6810381,
+    "seen": 1795107703.446226,
+    "ast_hash": "47932ba91d452906c6a8745ebcc9d85c",
     "semantic_hash": ""
   },
   "src/components/SupplierAccountsPanel.tsx": {
@@ -1006,6 +1006,24 @@
     "mtime": 1795103563.0831864,
     "seen": 1795103731.6970282,
     "ast_hash": "60805a9ac7798b70d3e8e14187554e4d",
+    "semantic_hash": ""
+  },
+  "src/components/QuickAddProductModal.tsx": {
+    "mtime": 1795106140.6494794,
+    "seen": 1795107703.446228,
+    "ast_hash": "fd1277e8c5f1bc83def92cbad35288d6",
+    "semantic_hash": ""
+  },
+  "src/components/SalesInvoiceComposer.tsx": {
+    "mtime": 1795107839.374166,
+    "seen": 1795107876.282492,
+    "ast_hash": "831ba110af943df042233729ce39e224",
+    "semantic_hash": ""
+  },
+  "src/db/migrations/2026-11-19-invoice-rounding-adjustments.sql": {
+    "mtime": 1795107209.659401,
+    "seen": 1795107703.446239,
+    "ast_hash": "326db9e9c87f88a82d66940a88f9063c",
     "semantic_hash": ""
   },
   "yarn.lock": {
