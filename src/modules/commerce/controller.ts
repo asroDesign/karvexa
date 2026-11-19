@@ -53,7 +53,8 @@ function calculateInvoiceAmounts<T extends { quantity: string; unit_price: strin
   headerDiscount: string,
   headerTax: string,
   shipping: string,
-  otherCosts: string
+  otherCosts: string,
+  forceTaxOverride = false
 ) {
   let subtotal = BigInt(0);
   let lineDiscountTotal = BigInt(0);
@@ -77,7 +78,7 @@ function calculateInvoiceAmounts<T extends { quantity: string; unit_price: strin
   const lineTaxAfterHeaderDiscount = isPositiveDec(headerDiscountTaxBase) && isPositiveDec(taxableSubtotal)
     ? mulDec(lineTaxTotal, divDec(subDec(taxableSubtotal, headerDiscountTaxBase), taxableSubtotal))
     : lineTaxTotal;
-  const taxTotal = isPositiveDec(headerTax) ? parseDecimal(headerTax) : lineTaxAfterHeaderDiscount;
+  const taxTotal = forceTaxOverride || isPositiveDec(headerTax) ? parseDecimal(headerTax) : lineTaxAfterHeaderDiscount;
   if (!eqDec(taxTotal, lineTaxTotal)) {
     let allocatedTax = BigInt(0);
     for (let i = 0; i < lineItems.length; i += 1) {
@@ -145,6 +146,7 @@ const invoiceCreateSchema = z.object({
   exchange_rate: z.string().regex(/^\d+(\.\d{1,4})?$/).default("1.0000"),
   discount_total: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
   tax_total: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
+  tax_calculation_mode: z.enum(["AUTO", "OVERRIDE"]).default("AUTO"),
   shipping_cost: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
   other_costs: z.string().regex(/^\d+(\.\d{1,2})?$/).default("0.00"),
   related_document_id: z.string().uuid().nullable().optional(),
@@ -270,7 +272,7 @@ export async function handleCommerceRoutes(
       const supplierId = body.supplier_id || body.contact_id;
       if (!supplierId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه تأمین‌کننده (supplier_id) الزامی است.");
 
-      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs);
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE");
       const lineItems = totals.lineItems;
       const [policy] = await db
         .select()
@@ -379,17 +381,37 @@ export async function handleCommerceRoutes(
       }
       if (method === "POST" && sub === "confirm") {
         await requireOrgContext(req, "purchases.confirm", { requireActiveSubscription: true });
+        const confirmation = z.object({
+          payment_allocations: z.array(z.object({
+            financial_account_id: z.string().uuid().nullable().optional(),
+            payment_method: z.enum(["CASH", "BANK", "BANK_TRANSFER", "CARD_TERMINAL", "POS", "WALLET", "CHEQUE", "CREDIT", "ACCOUNT_BALANCE", "OTHER"]),
+            amount: z.string().regex(/^\d+(\.\d{1,2})?$/),
+            reference_number: z.string().nullable().optional(),
+          })).optional(),
+        }).parse(await req.json().catch(() => ({})));
+        const idemKey = req.headers.get("idempotency-key");
+        const endpoint = `/api/v1/purchases/${inv.id}/confirm`;
+        const cached = await checkIdempotency({ organizationId: ctx.organizationId, key: idemKey, endpoint, payload: confirmation });
+        if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
         const result = await finalizePurchaseInvoice({
           organizationId: ctx.organizationId,
           invoiceId: inv.id,
           actorUserId: ctx.userId,
           actorEmail: ctx.email,
           ipAddress: ctx.ipAddress,
+          paymentAllocations: (confirmation.payment_allocations ?? []).map((payment) => ({
+            financialAccountId: payment.financial_account_id ?? null,
+            paymentMethod: payment.payment_method,
+            amount: payment.amount,
+            referenceNumber: payment.reference_number ?? null,
+          })),
         });
-        return ok({
+        const responseBody = {
           ...result,
           invoice: { ...result.invoice, status: "CONFIRMED", document_number: result.invoice.invoiceNumber, grand_total: result.invoice.totalAmount },
-        });
+        };
+        await saveIdempotency({ organizationId: ctx.organizationId, key: idemKey, endpoint, payload: confirmation, statusCode: 200, responseBody: responseBody as unknown as Record<string, unknown> });
+        return ok(responseBody);
       }
       if (method === "POST" && sub === "cancel") {
         await requireOrgContext(req, "purchases.cancel", { requireActiveSubscription: true });
@@ -604,7 +626,7 @@ export async function handleCommerceRoutes(
       const customerId = body.customer_id || body.contact_id;
       if (!customerId) throw new ApiError(422, "VALIDATION_ERROR", "شناسه مشتری (customer_id) الزامی است.");
 
-      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs);
+      const totals = calculateInvoiceAmounts(body.items, body.discount_total, body.tax_total, body.shipping_cost, body.other_costs, body.tax_calculation_mode === "OVERRIDE");
       const lineItems = totals.lineItems;
       const [policy] = await db
         .select()

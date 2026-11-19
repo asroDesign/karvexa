@@ -33,6 +33,7 @@ import {
 } from "@/lib/format";
 import { currentJalaliDate } from "@/lib/jalali";
 import { JalaliDatePicker } from "@/components/JalaliDatePicker";
+import { ProductPickerModal } from "@/components/ProductPickerModal";
 import { AdvancedModulesPanel, AdvancedSubTab } from "./AdvancedModulesPanel";
 import { GlassDashboard } from "./GlassDashboard";
 import { UserAccessSettings } from "./UserAccessSettings";
@@ -150,11 +151,22 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
   const [prodForm, setProdForm] = useState({
     code: "",
     name: "",
+    description: "",
+    item_type: "PRODUCT",
+    category_id: "",
+    brand_id: "",
     base_unit_id: "",
-    purchase_price: "",
-    sale_price: "",
+    purchase_price: "0.00",
+    sale_price: "0.00",
+    tax_rate: "10.00",
+    minimum_stock: "5.0000",
+    maximum_stock: "100.0000",
+    track_inventory: true,
+    allow_negative_stock: false,
+    is_active: true,
     barcode: "",
   });
+  const [showProductCreateModal, setShowProductCreateModal] = useState(false);
 
   // Contacts
   const [contactsList, setContactsList] = useState<Array<Record<string, unknown>>>([]);
@@ -460,10 +472,17 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
       await apiFetch("/api/v1/products", {
         method: "POST",
         organizationId: orgId,
-        body: JSON.stringify(prodForm),
+        body: JSON.stringify({
+          ...prodForm,
+          code: prodForm.code.trim() || undefined,
+          category_id: prodForm.category_id || null,
+          brand_id: prodForm.brand_id || null,
+          track_inventory: prodForm.item_type === "SERVICE" ? false : prodForm.track_inventory,
+        }),
       });
       onToast("کالای جدید در کاتالوگ ثبت شد.");
-      setProdForm({ ...prodForm, code: "", name: "", barcode: "" });
+      setProdForm((current) => ({ ...current, code: "", name: "", description: "", barcode: "", category_id: "", brand_id: "", purchase_price: "0.00", sale_price: "0.00", tax_rate: "10.00", minimum_stock: "5.0000", maximum_stock: "100.0000", track_inventory: true, allow_negative_stock: false, is_active: true }));
+      setShowProductCreateModal(false);
       loadTab("catalog");
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در ثبت کالا", "error");
@@ -1211,15 +1230,7 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                   </div>
                   <div>
                     <label className="block text-slate-600 mb-1">کالا</label>
-                    <select
-                      value={countForm.product_id}
-                      onChange={(e) => setCountForm({ ...countForm, product_id: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                    >
-                      {productsList.map((p) => (
-                        <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
-                      ))}
-                    </select>
+                    <ProductPickerModal products={productsList} value={countForm.product_id} onChange={(productId) => setCountForm({ ...countForm, product_id: productId })} />
                   </div>
                   <div className="col-span-2">
                     <label className="block text-slate-600 mb-1">موجودی واقعی شمارش‌شده</label>
@@ -1352,44 +1363,32 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
               </div>
 
               {/* Create Product */}
-              <form onSubmit={createProduct} className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-slate-900">افزودن کالای جدید</h3>
-                <div className="grid grid-cols-2 gap-2.5 text-xs">
-                  <input
-                    required
-                    placeholder="کد کالا (SKU)"
-                    value={prodForm.code}
-                    onChange={(e) => setProdForm({ ...prodForm, code: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-3 py-2"
-                  />
-                  <input
-                    required
-                    placeholder="نام کالا"
-                    value={prodForm.name}
-                    onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-3 py-2"
-                  />
-                  <input
-                    dir="ltr"
-                    placeholder="قیمت فروش"
-                    value={prodForm.sale_price}
-                    onChange={(e) => setProdForm({ ...prodForm, sale_price: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-3 py-2 font-mono text-left"
-                  />
-                  <select
-                    value={prodForm.base_unit_id}
-                    onChange={(e) => setProdForm({ ...prodForm, base_unit_id: e.target.value })}
-                    className="rounded-xl border border-slate-200 px-3 py-2"
-                  >
-                    {catalogMeta.units.map((u) => (
-                      <option key={String(u.id)} value={String(u.id)}>{String(u.name)}</option>
-                    ))}
-                  </select>
-                </div>
-                <button type="submit" className="w-full rounded-xl bg-emerald-700 text-white py-2 text-xs font-medium cursor-pointer">
-                  ثبت کالا
-                </button>
-              </form>
+              <div className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-5">
+                <div><h3 className="text-sm font-bold text-slate-900">افزودن کالا یا خدمت</h3><p className="mt-2 text-xs leading-6 text-slate-500">فرم کامل کاتالوگ شامل نوع، واحد، دسته‌بندی، قیمت‌ها و کنترل موجودی را باز کنید.</p></div>
+                <button type="button" onClick={() => setShowProductCreateModal(true)} className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-medium text-white"><Plus className="h-4 w-4"/>افزودن کالای جدید</button>
+              </div>
+              {showProductCreateModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/45 p-3" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowProductCreateModal(false); }}>
+                <form onSubmit={createProduct} className="max-h-[92vh] w-full max-w-2xl space-y-3 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+                  <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-bold text-slate-900">افزودن کالا یا خدمت</h3><p className="mt-1 text-[11px] text-slate-500">مشخصات فرم کاتالوگ اپلیکیشن</p></div><button type="button" onClick={() => setShowProductCreateModal(false)} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100">بستن</button></div>
+                  <div className="grid grid-cols-1 gap-2.5 text-xs sm:grid-cols-2">
+                    <label>نوع کالا / خدمت<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" value={prodForm.item_type} onChange={(e) => setProdForm({ ...prodForm, item_type: e.target.value, track_inventory: e.target.value === "SERVICE" ? false : prodForm.track_inventory })}><option value="PRODUCT">کالا</option><option value="SERVICE">خدمت</option><option value="RAW_MATERIAL">مواد اولیه</option><option value="FINISHED_PRODUCT">محصول نهایی</option></select></label>
+                    <label>نام کالا / خدمت *<input required minLength={2} maxLength={180} value={prodForm.name} onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" /></label>
+                    <label>کد SKU<input minLength={2} maxLength={64} value={prodForm.code} onChange={(e) => setProdForm({ ...prodForm, code: e.target.value })} placeholder="اختیاری؛ در صورت خالی بودن خودکار ساخته می‌شود" className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" /></label>
+                    <label>بارکد<input dir="ltr" value={prodForm.barcode} onChange={(e) => setProdForm({ ...prodForm, barcode: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label>
+                    <label>دسته‌بندی<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" value={prodForm.category_id} onChange={(e) => setProdForm({ ...prodForm, category_id: e.target.value })}><option value="">بدون دسته‌بندی</option>{catalogMeta.categories.map((item) => <option key={String(item.id)} value={String(item.id)}>{String(item.name)}</option>)}</select></label>
+                    <label>برند<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" value={prodForm.brand_id} onChange={(e) => setProdForm({ ...prodForm, brand_id: e.target.value })}><option value="">بدون برند</option>{catalogMeta.brands.map((item) => <option key={String(item.id)} value={String(item.id)}>{String(item.name)}</option>)}</select></label>
+                    <label>واحد اصلی *<select required className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" value={prodForm.base_unit_id} onChange={(e) => setProdForm({ ...prodForm, base_unit_id: e.target.value })}><option value="">انتخاب واحد</option>{catalogMeta.units.map((item) => <option key={String(item.id)} value={String(item.id)}>{String(item.name)}</option>)}</select></label>
+                    <label>نرخ مالیات (%)<input dir="ltr" inputMode="decimal" value={prodForm.tax_rate} onChange={(e) => setProdForm({ ...prodForm, tax_rate: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label>
+                    <label>قیمت خرید (ریال)<input dir="ltr" inputMode="decimal" value={prodForm.purchase_price} onChange={(e) => setProdForm({ ...prodForm, purchase_price: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label>
+                    <label>قیمت فروش (ریال)<input dir="ltr" inputMode="decimal" value={prodForm.sale_price} onChange={(e) => setProdForm({ ...prodForm, sale_price: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label>
+                    {prodForm.item_type !== "SERVICE" && <><label>حداقل موجودی<input dir="ltr" inputMode="decimal" value={prodForm.minimum_stock} onChange={(e) => setProdForm({ ...prodForm, minimum_stock: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label><label>حداکثر موجودی<input dir="ltr" inputMode="decimal" value={prodForm.maximum_stock} onChange={(e) => setProdForm({ ...prodForm, maximum_stock: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-left" /></label></>}
+                    <label className="col-span-full">توضیحات<textarea rows={3} value={prodForm.description} onChange={(e) => setProdForm({ ...prodForm, description: e.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" /></label>
+                  </div>
+                  {prodForm.item_type !== "SERVICE" && <div className="grid gap-2 rounded-xl bg-slate-50 p-3 text-xs sm:grid-cols-2"><label className="flex items-center gap-2"><input type="checkbox" checked={prodForm.track_inventory} onChange={(e) => setProdForm({ ...prodForm, track_inventory: e.target.checked })}/>کنترل موجودی انبار</label><label className="flex items-center gap-2"><input type="checkbox" checked={prodForm.allow_negative_stock} onChange={(e) => setProdForm({ ...prodForm, allow_negative_stock: e.target.checked })}/>اجازه موجودی منفی در فروش آفلاین</label></div>}
+                  <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={prodForm.is_active} onChange={(e) => setProdForm({ ...prodForm, is_active: e.target.checked })}/>فعال</label>
+                  <button type="submit" disabled={!prodForm.base_unit_id} className="w-full rounded-xl bg-emerald-700 py-2.5 text-xs font-medium text-white disabled:opacity-50">ثبت در کاتالوگ</button>
+                </form>
+              </div>}
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
@@ -1524,18 +1523,14 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
                     <option key={String(w.id)} value={String(w.id)}>{String(w.name)}</option>
                   ))}
                 </select>
-                <select
+                <ProductPickerModal
+                  products={productsList}
                   value={saleForm.product_id}
-                  onChange={(e) => {
-                const product = productsList.find((item) => String(item.id) === e.target.value);
-                setSaleForm({ ...saleForm, product_id: e.target.value, unit_price: String(product?.sale_price ?? "") });
-              }}
-                  className="rounded-xl border border-slate-200 px-3 py-2"
-                >
-                  {productsList.map((p) => (
-                    <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
-                  ))}
-                </select>
+                  onChange={(productId) => {
+                    const product = productsList.find((item) => String(item.id) === productId);
+                    setSaleForm({ ...saleForm, product_id: productId, unit_price: String(product?.sale_price ?? "") });
+                  }}
+                />
                 <input
                   dir="ltr"
                   value={saleForm.quantity}

@@ -33,6 +33,7 @@ import {
 } from "recharts";
 import { apiFetch, formatIrr, formatQty } from "@/lib/format";
 import { JalaliDatePicker, JalaliMonthPicker } from "@/components/JalaliDatePicker";
+import { ProductPickerModal } from "@/components/ProductPickerModal";
 import { currentJalaliDate } from "@/lib/jalali";
 
 export type AdvancedSubTab =
@@ -716,7 +717,7 @@ export function AdvancedModulesPanel({
 
       {/* 2. QUICK EXPENSE & INCOME WITH AUTOMATIC ACCOUNT MAPPING */}
       {activeTab === "quick_entry" && (
-        <div className="space-y-5">
+        <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div className="inline-flex rounded-xl bg-slate-100 p-1 text-xs">
@@ -749,7 +750,7 @@ export function AdvancedModulesPanel({
               </span>
             </div>
 
-            <form onSubmit={handleQuickEntry} className="grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
+            <form onSubmit={handleQuickEntry} className="grid grid-cols-1 gap-3 text-xs">
               <select
                 required
                 value={quickForm.category_id}
@@ -802,33 +803,21 @@ export function AdvancedModulesPanel({
             </form>
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
-            <h3 className="text-sm font-bold text-slate-900 mb-3">تراکنش‌های سریع ثبت‌شده ({quickTxs.length})</h3>
-            <table className="w-full text-xs text-right">
-              <thead className="bg-slate-50 border-b border-slate-200">
-                <tr>
-                  <th className="px-3 py-2">نوع / تاریخ</th>
-                  <th className="px-3 py-2">عنوان</th>
-                  <th className="px-3 py-2">دسته‌بندی</th>
-                  <th className="px-3 py-2">حساب خزانه</th>
-                  <th className="px-3 py-2">مبلغ (ریال)</th>
-                  <th className="px-3 py-2">وضعیت</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
-                {quickTxs.map((t) => (
-                  <tr key={String(t.id)}>
-                    <td className="px-3 py-2 font-mono text-[11px]">{String(t.kind)} • {String(t.tx_date)}</td>
-                    <td className="px-3 py-2 font-semibold">{String(t.title)}</td>
-                    <td className="px-3 py-2">{String(t.category_name)}</td>
-                    <td className="px-3 py-2">{String(t.account_name)}</td>
-                    <td className="px-3 py-2 font-bold">{formatIrr(t.amount as string)}</td>
-                    <td className="px-3 py-2 text-emerald-700 font-semibold">{String(t.status)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {(["EXPENSE", "INCOME"] as const).map((kind) => {
+            const entries = quickTxs.filter((item) => String(item.kind).toUpperCase() === kind);
+            const income = kind === "INCOME";
+            return <section key={kind} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-center justify-between gap-2"><h3 className="text-sm font-bold text-slate-900">تراکنش‌های سریع {income ? "درآمد" : "هزینه"}</h3><span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${income ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{entries.length} مورد</span></div>
+              <div className="max-h-[480px] space-y-2 overflow-y-auto">
+                {entries.map((item) => <article key={String(item.id)} className="rounded-xl border border-slate-100 p-3 text-xs">
+                  <div className="flex items-start justify-between gap-2"><strong className="leading-5">{String(item.title)}</strong><b className={`shrink-0 tabular-nums ${income ? "text-emerald-700" : "text-rose-700"}`}>{formatIrr(item.amount as string)} ریال</b></div>
+                  <div className="mt-2 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[10px] text-slate-500"><span>{String(item.category_name)} • {String(item.account_name)}</span><span>{String(item.tx_date)}</span></div>
+                  <div className="mt-2 text-[10px] font-semibold text-slate-600">{String(item.status)}</div>
+                </article>)}
+                {!entries.length && <p className="rounded-xl border border-dashed border-slate-200 p-4 text-center text-xs text-slate-500">تراکنش ثبت‌شده‌ای وجود ندارد.</p>}
+              </div>
+            </section>;
+          })}
         </div>
       )}
 
@@ -866,17 +855,8 @@ export function AdvancedModulesPanel({
               </div>
               <div>
                 <label className="block text-slate-600 mb-1">۲. انبار و کالا</label>
-                <select
-                  value={mixedForm.product_id}
-                  onChange={(e) => setMixedForm({ ...mixedForm, product_id: e.target.value })}
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                >
-                  {productsList.map((p) => (
-                    <option key={String(p.id)} value={String(p.id)}>
-                      {String(p.name)} (موجود: {formatQty(p.total_on_hand_qty as string)})
-                    </option>
-                  ))}
-                </select>
+                <ProductPickerModal products={productsList} value={mixedForm.product_id} onChange={(productId) => setMixedForm({ ...mixedForm, product_id: productId })} />
+                <span className="mt-1 block text-[10px] text-slate-500">موجودی کل: {formatQty(String(productsList.find((item) => String(item.id) === mixedForm.product_id)?.total_on_hand_qty ?? "0"))}</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -1025,15 +1005,7 @@ export function AdvancedModulesPanel({
               <span>تعریف تنوع کالا (سایز/رنگ/مدل) + ثبت موجودی اول دوره مستقل در Stock Ledger</span>
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
-              <select
-                value={varForm.product_id}
-                onChange={(e) => setVarForm({ ...varForm, product_id: e.target.value })}
-                className="rounded-xl border border-slate-200 px-3 py-2"
-              >
-                {productsList.map((p) => (
-                  <option key={String(p.id)} value={String(p.id)}>{String(p.name)}</option>
-                ))}
-              </select>
+              <ProductPickerModal products={productsList} value={varForm.product_id} onChange={(productId) => setVarForm({ ...varForm, product_id: productId })} />
               <input
                 value={varForm.variant_name}
                 onChange={(e) => setVarForm({ ...varForm, variant_name: e.target.value })}

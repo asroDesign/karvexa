@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import { apiFetch, formatIrr, formatQty } from "@/lib/format";
 import { currentJalaliDate, gregorianIsoToJalali } from "@/lib/jalali";
 import { JalaliDatePicker } from "@/components/JalaliDatePicker";
+import { ProductPickerModal } from "@/components/ProductPickerModal";
 
 type Row = Record<string, unknown>;
 type Toast = (message: string, type?: "success" | "error") => void;
@@ -166,12 +167,13 @@ type ProductLine = { product_id: string; variant_id: string; quantity: string; u
 type ReceiveLine = { transfer_item_id: string; product_id: string; accepted_quantity: string; missing_qty: string; damaged_qty: string; rejected_quantity: string; discrepancy_description: string };
 type IssueLine = { product_id: string; variant_id: string; quantity: string; unit_cost: string };
 type TransferLine = { product_id: string; variant_id: string; quantity: string };
-type InventoryView = "overview" | "operations" | "ledger" | "transfers";
+type InventoryView = "overview" | "operations" | "ledger" | "transfers" | "suppliers";
 const inventoryViews: Array<{ id: InventoryView; label: string }> = [
   { id: "overview", label: "موجودی و انبارها" },
-  { id: "operations", label: "رسید، خروج و تسویه" },
+  { id: "operations", label: "ثبت رسید خرید / تعدیل" },
   { id: "ledger", label: "کاردکس و گردش" },
   { id: "transfers", label: "حواله بین انبارها" },
+  { id: "suppliers", label: "تسویه و حساب تأمین‌کننده" },
 ];
 const transferStatusLabels: Record<string, string> = {
   DRAFT: "پیش‌نویس",
@@ -198,6 +200,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [stockSearch, setStockSearch] = useState("");
   const [inventoryView, setInventoryView] = useState<InventoryView>("overview");
   const [transferSearch, setTransferSearch] = useState("");
+  const [transferStatusFilter, setTransferStatusFilter] = useState("ALL");
   const [warehouseFilter, setWarehouseFilter] = useState("");
   const [movementDateFrom, setMovementDateFrom] = useState("");
   const [movementDateTo, setMovementDateTo] = useState("");
@@ -209,6 +212,8 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [issueItems, setIssueItems] = useState<IssueLine[]>([{ product_id: "", variant_id: "", quantity: "", unit_cost: "" }]);
   const [supplierProfile, setSupplierProfile] = useState<Row | null>(null);
   const [receipt, setReceipt] = useState({ warehouse_id: "", supplier_id: "", supplier_invoice_number: "", invoice_date_jalali: jalaliToday(), shipping_cost: "0.00", customs_and_extra_cost: "0.00", supplier_discount: "0.00", paid_amount: "0.00", payment_bank_account_id: "", description: "رسید خرید کالا" });
+  const [receiptMode, setReceiptMode] = useState<"PURCHASE" | "ADJUSTMENT">("PURCHASE");
+  const [adjustmentDirection, setAdjustmentDirection] = useState<"IN" | "OUT">("IN");
   const [receiptItems, setReceiptItems] = useState<ProductLine[]>([{ product_id: "", variant_id: "", quantity: "", unit_price: "" }]);
   const [transferForm, setTransferForm] = useState({ source_warehouse_id: "", destination_warehouse_id: "", transfer_date_jalali: jalaliToday(), reason: "انتقال بین انبارها", source_responsible_name: "", destination_responsible_name: "", notes: "" });
   const [transferItems, setTransferItems] = useState<TransferLine[]>([{ product_id: "", variant_id: "", quantity: "" }]);
@@ -217,6 +222,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [receiveDate, setReceiveDate] = useState(jalaliToday());
   const [settlement, setSettlement] = useState({ supplier_id: "", financial_account_id: "", amount: "0.00", payment_method: "BANK_TRANSFER", settlement_date_jalali: jalaliToday(), description: "تسویه حساب تأمین‌کننده" });
   const [busy, setBusy] = useState(false);
+  const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [transferPendingAction, setTransferPendingAction] = useState("");
   const transferRequestKeys = useRef(new Map<string, string>());
   const transferRequestsInFlight = useRef(new Set<string>());
@@ -275,22 +281,35 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   async function createReceipt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!orgId) return;
-    const validItems = receiptItems.filter((line) => line.product_id && Number(line.quantity) > 0 && line.unit_price.trim() !== "" && Number(line.unit_price) >= 0);
-    if (!receipt.warehouse_id || !receipt.supplier_id || !receipt.supplier_invoice_number.trim() || validItems.length === 0) {
-      onToast("انبار، تأمین‌کننده، شماره فاکتور و دست‌کم یک قلم با تعداد معتبر را وارد کنید.", "error");
+    const validItems = receiptItems.filter((line) => line.product_id && Number(line.quantity) > 0 && (receiptMode === "ADJUSTMENT" || (line.unit_price.trim() !== "" && Number(line.unit_price) >= 0)));
+    if (!receipt.warehouse_id || validItems.length === 0 || (receiptMode === "PURCHASE" && (!receipt.supplier_id || !receipt.supplier_invoice_number.trim()))) {
+      onToast(receiptMode === "PURCHASE" ? "انبار، تأمین‌کننده، شماره فاکتور و دست‌کم یک قلم معتبر را وارد کنید." : "انبار و دست‌کم یک قلم تعدیل با مقدار مثبت را وارد کنید.", "error");
       return;
     }
+    setReceiptSubmitting(true);
     try {
-      await apiFetch("/api/v1/inventory/receipts", {
+      const groupedDeltas = new Map<string, number>();
+      for (const item of validItems) groupedDeltas.set(item.product_id, (groupedDeltas.get(item.product_id) ?? 0) + Number(item.quantity));
+      const adjustmentItems = [...groupedDeltas.entries()].map(([productId, delta]) => ({
+        product_id: productId,
+        adjustment_quantity: delta.toFixed(4),
+        adjustment_direction: adjustmentDirection,
+      }));
+      const endpoint = receiptMode === "PURCHASE" ? "/api/v1/inventory/receipts" : "/api/v1/inventory/counts";
+      const body = receiptMode === "PURCHASE"
+        ? { ...receipt, items: validItems.map((item) => ({ ...item, variant_id: item.variant_id || null })), ...(Number(receipt.paid_amount) > 0 ? {} : { payment_bank_account_id: null }) }
+        : { warehouse_id: receipt.warehouse_id, count_date_jalali: receipt.invoice_date_jalali, notes: `${receipt.description || "تعدیل موجودی"} • ${adjustmentDirection === "IN" ? "افزایش" : "کاهش"} ثبت‌شده از فرم رسید خرید / تعدیل`, items: adjustmentItems };
+      await apiFetch(endpoint, {
         method: "POST", organizationId: orgId, headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ ...receipt, items: validItems.map((item) => ({ ...item, variant_id: item.variant_id || null })), ...(Number(receipt.paid_amount) > 0 ? {} : { payment_bank_account_id: null }) }),
+        body: JSON.stringify(body),
       });
-      onToast("رسید با تخصیص بهای حمل و هزینه‌های جانبی ثبت و به موجودی و حساب تأمین‌کننده متصل شد.");
+      onToast(receiptMode === "PURCHASE" ? "رسید خرید با تخصیص هزینه‌های جانبی در موجودی و حساب تأمین‌کننده ثبت شد." : `تعدیل ${adjustmentDirection === "IN" ? "افزایشی" : "کاهشی"} با بهای میانگین موجودی و سند مالی دوبل در سرور ثبت شد.`);
       const supplierId = receipt.supplier_id;
       setReceipt((old) => ({ ...old, supplier_invoice_number: "", paid_amount: "0.00" }));
       await reload();
-      if (supplierId) setSupplierProfile(await apiFetch<Row>(`/api/v1/suppliers/${supplierId}/profile`, { organizationId: orgId }));
+      if (receiptMode === "PURCHASE" && supplierId) setSupplierProfile(await apiFetch<Row>(`/api/v1/suppliers/${supplierId}/profile`, { organizationId: orgId }));
     } catch (error) { onToast(error instanceof Error ? error.message : "ثبت رسید کالا ناموفق بود", "error"); }
+    finally { setReceiptSubmitting(false); }
   }
 
   async function createIssue(event: FormEvent<HTMLFormElement>) {
@@ -490,7 +509,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     } catch (error) { onToast(error instanceof Error ? error.message : "تسویه تأمین‌کننده ناموفق بود", "error"); }
   }
 
-  const lineSelect = (value: string, onChange: (value: string) => void) => <select className={field} required value={value} onChange={(event) => onChange(event.target.value)}><option value="">انتخاب کالا</option>{products.map((product) => <option key={text(product.id)} value={text(product.id)}>{text(product.name)} ({text(product.sku ?? product.code)})</option>)}</select>;
+  const lineSelect = (value: string, onChange: (value: string) => void) => <ProductPickerModal products={products} value={value} onChange={onChange} />;
   const variantSelect = (productId: string, value: string, onChange: (value: string) => void) => {
     const options = variants.filter((variant) => text(variant.product_id) === productId);
     if (!options.length) return null;
@@ -502,6 +521,9 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     const reserved = Number(balance?.reserved_qty ?? balance?.reservedQty ?? 0);
     return formatQty(Math.max(0, onHand - reserved));
   };
+  const onHandQty = (warehouseId: string, productId: string) => rows(stock?.balances)
+    .filter((row) => text(row.warehouse_id ?? row.warehouseId) === warehouseId && text(row.product_id ?? row.productId) === productId && !text(row.variant_id ?? row.variantId))
+    .reduce((sum, row) => sum + Number(row.on_hand_qty ?? row.onHandQty ?? 0), 0);
   const warehouseSelect = (value: string, onChange: (value: string) => void) => <select className={field} required value={value} onChange={(event) => onChange(event.target.value)}>{warehouses.map((item) => <option key={text(item.id)} disabled={!Boolean(item.is_active ?? true)} value={text(item.id)}>{text(item.name)}{item.is_default ? " • اصلی" : ""}{!Boolean(item.is_active ?? true) ? " • غیرفعال" : ""}</option>)}</select>;
   const stockExportQuery = new URLSearchParams();
   if (warehouseFilter) stockExportQuery.set("warehouse_id", warehouseFilter);
@@ -513,6 +535,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     `${text(document.document_number)} ${text(document.reason ?? document.description)} ${text(document.document_date)}`.toLowerCase().includes(documentSearch.trim().toLowerCase())
   );
   const shownTransfers = transfers.filter((transfer) =>
+    (transferStatusFilter === "ALL" || text(transfer.status) === transferStatusFilter) &&
     `${text(transfer.transfer_number)} ${text(transfer.source_warehouse_name)} ${text(transfer.destination_warehouse_name)} ${rows(transfer.items).map((item) => `${text(item.product_name)} ${text(item.variant_name)} ${text(item.variant_sku)}`).join(" ")}`
       .toLowerCase().includes(transferSearch.trim().toLowerCase())
   );
@@ -520,7 +543,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   return (
     <section className="space-y-4 border-t border-slate-200 pt-5">
       <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-bold">رسید خرید، تسویه تأمین‌کننده و حواله مرحله‌ای</h3><p className="mt-1 text-xs text-slate-500">هزینهٔ تمام‌شده به تفکیک کالا تخصیص می‌یابد و جابجایی مرحله‌ای فقط با تأییدهای انبار ثبت می‌شود.</p></div><div className="flex flex-wrap gap-2">{orgId && <><button type="button" onClick={() => void downloadReport(`/api/v1/inventory/exports/stock${stockExportQuery.size ? `?${stockExportQuery}` : ""}`, orgId, `inventory-stock-${today()}.xlsx`, onToast)} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">خروجی موجودی</button><button type="button" onClick={() => void downloadReport(`/api/v1/inventory/exports/movements${movementExportQuery.size ? `?${movementExportQuery}` : ""}`, orgId, `inventory-movements-${today()}.xlsx`, onToast)} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">خروجی گردش انبار</button></>}<button type="button" onClick={() => void reload()} className="rounded-xl border border-slate-200 px-3 py-2 text-xs">{busy ? "در حال دریافت…" : "بروزرسانی"}</button></div></div>
-      <nav aria-label="بخش‌های انبار" role="tablist" className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1 sm:grid-cols-4">
+      <nav aria-label="بخش‌های انبار" role="tablist" className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1 sm:grid-cols-3 xl:grid-cols-5">
         {inventoryViews.map((view) => <button key={view.id} type="button" role="tab" aria-selected={inventoryView === view.id} onClick={() => setInventoryView(view.id)} className={`rounded-xl px-3 py-2 text-xs font-semibold transition ${inventoryView === view.id ? "bg-white text-teal-800 shadow-sm" : "text-slate-600 hover:bg-white/70"}`}>{view.label}</button>)}
       </nav>
       {inventoryView === "overview" && <div className="space-y-3">
@@ -551,15 +574,15 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         <div className="max-h-56 space-y-2 overflow-auto">{shownStockDocuments.map((document) => <button key={text(document.id)} type="button" onClick={() => void openStockDocument(document, documentFilter === "RECEIPT" ? "receipts" : "issues")} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-right text-xs hover:bg-slate-50"><span><strong>{text(document.document_number, "سند انبار")}</strong> • {gregorianIsoToJalali(text(document.document_date))} • {text(document.reason ?? document.description)}</span><span className="rounded-full bg-slate-100 px-2 py-1">{text(document.status)}</span></button>)}{!shownStockDocuments.length && <div className="py-4 text-center text-xs text-slate-500">سندی مطابق جستجو پیدا نشد.</div>}</div>
         {selectedStockDocument && <div className="space-y-2 rounded-xl border border-teal-200 bg-teal-50/40 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">{text(selectedStockDocument.document_number)} • {gregorianIsoToJalali(text(selectedStockDocument.document_date))}</strong><div className="flex gap-2"><button type="button" onClick={printStockDocument} className="rounded-lg border px-3 py-1.5 text-xs">چاپ سند</button><button type="button" onClick={() => setSelectedStockDocument(null)} className="text-xs underline">بستن</button></div></div><div className="text-[11px]">{rows(selectedStockDocument.items).map((item) => `${text(item.product_name)}: ${formatQty(text(item.quantity))}`).join("، ")}</div></div>}
       </div>}
-      <div className={inventoryView === "operations" || inventoryView === "transfers" ? "grid grid-cols-1 gap-4 xl:grid-cols-2" : "hidden"}>
+      <div className={inventoryView === "operations" || inventoryView === "transfers" || inventoryView === "suppliers" ? "grid grid-cols-1 gap-4 xl:grid-cols-2" : "hidden"}>
         {inventoryView === "operations" && <form onSubmit={createReceipt} className={`${card} space-y-3`}>
-          <h4 className="text-xs font-bold">رسید ورود با بهای تمام‌شده</h4>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label><label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label><label className="text-[11px]">شماره فاکتور<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label><label className="text-[11px]">تاریخ فاکتور<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
-          <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1.3fr_1fr_.65fr_1fr]">{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, line.unit_price) }); })}{variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label="تعداد" required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/><input className={field} aria-label="قیمت واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/></div>)}</div>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-xs font-bold">ثبت رسید خرید / تعدیل</h4><p className="mt-1 text-[11px] text-slate-500">رسید خرید با بهای تمام‌شده یا تعدیل افزایشی/کاهشی با بهای میانگین را ثبت کنید.</p></div><div className="flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setReceiptMode("PURCHASE")} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "PURCHASE" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>رسید خرید</button><button type="button" onClick={() => { setReceiptMode("ADJUSTMENT"); setReceiptItems((items) => items.map((item) => ({ ...item, variant_id: "" }))); }} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "ADJUSTMENT" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>تعدیل موجودی</button></div></div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label>{receiptMode === "PURCHASE" && <label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label>}{receiptMode === "PURCHASE" && <label className="text-[11px]">شماره فاکتور تأمین‌کننده<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label>}{receiptMode === "ADJUSTMENT" && <label className="text-[11px]">نوع تعدیل<select className={`${field} mt-1`} value={adjustmentDirection} onChange={(event) => setAdjustmentDirection(event.target.value as "IN" | "OUT")}><option value="IN">افزایش موجودی</option><option value="OUT">کاهش موجودی</option></select></label>}<label className="text-[11px]">{receiptMode === "PURCHASE" ? "تاریخ فاکتور" : "تاریخ تعدیل"}<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
+          <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className={`grid grid-cols-1 gap-2 ${receiptMode === "PURCHASE" ? "sm:grid-cols-[1.3fr_1fr_.65fr_1fr]" : "sm:grid-cols-[1.5fr_1fr_1fr]"}`}>{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, line.unit_price) }); })}{receiptMode === "PURCHASE" && variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label={receiptMode === "PURCHASE" ? "تعداد خرید" : adjustmentDirection === "IN" ? "مقدار افزایش موجودی" : "مقدار کاهش موجودی"} placeholder={receiptMode === "PURCHASE" ? "تعداد" : adjustmentDirection === "IN" ? "مقدار ورود" : "مقدار خروج"} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/>{receiptMode === "PURCHASE" ? <input className={field} aria-label="قیمت واحد" placeholder="قیمت خرید واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/> : <div className="rounded-xl bg-slate-50 px-3 py-2 text-[10px] text-slate-600">موجودی فعلی: {formatQty(onHandQty(receipt.warehouse_id, line.product_id))} • موجودی بعد از تعدیل: {formatQty((onHandQty(receipt.warehouse_id, line.product_id) + (adjustmentDirection === "IN" ? 1 : -1) * Number(line.quantity || 0)).toFixed(4))}</div>}</div>)}</div>
           <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setReceiptItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "1.0000", unit_price: text(products[0]?.purchase_price, "0.00") }])}>افزودن قلم</button><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" disabled={receiptItems.length <= 1} onClick={() => setReceiptItems((items) => items.slice(0, -1))}>حذف قلم آخر</button></div>
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">{([["shipping_cost", "هزینه حمل"], ["customs_and_extra_cost", "گمرک و سایر هزینه"], ["supplier_discount", "تخفیف"], ["paid_amount", "پرداخت‌شده"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>
-          {Number(receipt.paid_amount) > 0 && <label className="block text-[11px]">پرداخت از حساب<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label>}
-          <button className={button}>ثبت رسید و صدور سند موجودی</button>
+          {receiptMode === "PURCHASE" && <><div className="grid grid-cols-2 gap-2 md:grid-cols-4">{([["shipping_cost", "هزینه حمل"], ["customs_and_extra_cost", "گمرک و سایر هزینه"], ["supplier_discount", "تخفیف"], ["paid_amount", "پرداخت‌شده"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>{Number(receipt.paid_amount) > 0 && <label className="block text-[11px]">پرداخت از حساب<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label>}</>}
+          {receiptMode === "ADJUSTMENT" && <p className="rounded-xl bg-amber-50 p-3 text-[10px] leading-5 text-amber-900">تعدیل از مسیر انبارگردانی ثبت می‌شود؛ برای کاهش، موجودی کافی الزامی است. ارزش تعدیل با بهای میانگین/FIFO کالا محاسبه و سند دوطرفهٔ موجودی و بهای تمام‌شده از API صادر می‌شود.</p>}
+          <div className="flex gap-2"><input className={field} aria-label="شرح سند" value={receipt.description} onChange={(event) => setReceipt({ ...receipt, description: event.target.value })}/><button disabled={receiptSubmitting} className={button}>{receiptSubmitting ? "در حال ثبت…" : receiptMode === "PURCHASE" ? "ثبت رسید خرید" : "ثبت تعدیل موجودی"}</button></div>
         </form>}
         {inventoryView === "operations" && <form onSubmit={createIssue} className={`${card} space-y-3`}>
           <h4 className="text-xs font-bold">حواله خروج کالا از انبار</h4>
@@ -569,7 +592,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
           <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setIssueItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "", unit_cost: "" }])}>افزودن قلم</button><input className={field} aria-label="شرح حواله خروج" value={issue.description} onChange={(event) => setIssue({ ...issue, description: event.target.value })}/><button className={button}>ثبت حواله خروج</button></div>
         </form>}
         <div className="space-y-4">
-          {inventoryView === "operations" && <form onSubmit={settleSupplier} className={`${card} space-y-3`}>
+          {inventoryView === "suppliers" && <form onSubmit={settleSupplier} className={`${card} space-y-3`}>
             <h4 className="text-xs font-bold">تسویه بدهی تأمین‌کننده</h4>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><select className={field} required value={settlement.supplier_id} onChange={(event) => setSettlement({ ...settlement, supplier_id: event.target.value })}><option value="">تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select><select className={field} required value={settlement.financial_account_id} onChange={(event) => setSettlement({ ...settlement, financial_account_id: event.target.value })}><option value="">حساب پرداخت</option>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)}</option>)}</select><input className={field} required dir="ltr" inputMode="decimal" aria-label="مبلغ تسویه" value={settlement.amount} onChange={(event) => setSettlement({ ...settlement, amount: event.target.value })}/><JalaliDatePicker value={settlement.settlement_date_jalali} onChange={(value) => setSettlement({ ...settlement, settlement_date_jalali: value })}/></div>
             <div className="flex gap-2"><select className={field} value={settlement.payment_method} onChange={(event) => setSettlement({ ...settlement, payment_method: event.target.value })}><option value="BANK_TRANSFER">انتقال بانکی</option><option value="CASH">نقد</option><option value="BANK">بانک</option><option value="CARD_TERMINAL">کارت‌خوان</option><option value="CHEQUE">چک</option></select><input className={field} value={settlement.description} onChange={(event) => setSettlement({ ...settlement, description: event.target.value })}/><button className={button}>ثبت تسویه</button></div>
@@ -584,7 +607,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
           </form>}
         </div>
       </div>
-      {inventoryView === "operations" && supplierProfile && <div className={`${card} space-y-3`}>
+      {inventoryView === "suppliers" && supplierProfile && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">حساب تأمین‌کننده • {text((supplierProfile.supplier as Row | undefined)?.display_name)}</h4><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">مانده پرداختنی: {formatIrr(text((supplierProfile.summary as Row | undefined)?.outstanding_payable))} ریال</span></div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-xs"><div className="rounded-xl bg-slate-50 p-3">جمع فاکتورها<strong className="mt-1 block">{formatIrr(text((supplierProfile.summary as Row | undefined)?.total_billed_credit))} ریال</strong></div><div className="rounded-xl bg-emerald-50 p-3">جمع تسویه<strong className="mt-1 block">{formatIrr(text((supplierProfile.summary as Row | undefined)?.total_settled_debit))} ریال</strong></div><div className="rounded-xl bg-indigo-50 p-3">فاکتورهای خرید<strong className="mt-1 block">{text((supplierProfile.summary as Row | undefined)?.purchase_invoices_count, "0")}</strong></div><div className="rounded-xl bg-teal-50 p-3">رسیدهای انبار<strong className="mt-1 block">{text((supplierProfile.summary as Row | undefined)?.warehouse_receipts_count, "0")}</strong></div></div>
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2"><div className="max-h-44 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-[11px]">گردش دفتر حساب تأمین‌کننده</strong>{rows(supplierProfile.ledger_transactions).slice(0, 12).map((item, index) => <div key={text(item.id, String(index))} className="flex justify-between gap-2 border-b border-slate-100 py-1.5 text-[11px]"><span>{gregorianIsoToJalali(text(item.txDate ?? item.tx_date))} • {text(item.description)}</span><span className="tabular-nums">بد {formatIrr(text(item.debit))} / بس {formatIrr(text(item.credit))}</span></div>)}</div><div className="max-h-44 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-[11px]">پرداخت‌های خزانه‌ای ثبت‌شده</strong>{rows(supplierProfile.settlements).slice(0, 12).map((item, index) => <div key={text(item.id, String(index))} className="flex justify-between gap-2 border-b border-slate-100 py-1.5 text-[11px]"><span>{gregorianIsoToJalali(text(item.txDate ?? item.tx_date))} • {text(item.description)}</span><span className="tabular-nums">{formatIrr(text(item.amount))} ریال</span></div>)}</div></div>
@@ -595,7 +618,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         <div className="max-h-64 overflow-auto">{movements.filter((row) => `${text(row.document_number)} ${text(row.product_name)} ${text(row.product_sku)} ${text(row.variant_name)} ${text(row.variant_sku)}`.toLowerCase().includes(stockSearch.trim().toLowerCase())).slice(0, 100).map((row) => <div key={text(row.id)} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 py-2 text-[11px]"><span>{gregorianIsoToJalali(text(row.movement_date))} • {text(row.document_number)} • {text(row.warehouse_name)} / {text(row.product_name)}{text(row.variant_name) ? ` • ${text(row.variant_name)}` : ""}</span><span className="font-semibold tabular-nums">{Number(row.quantity_delta) >= 0 ? "+" : ""}{formatQty(text(row.quantity_delta))} ← مانده {formatQty(text(row.balance_after_qty))}</span></div>)}{!movements.length && <div className="py-3 text-xs text-slate-500">گردش انباری در سرور ثبت نشده است.</div>}</div>
       </div>}
       {inventoryView === "transfers" && <div className={`${card} space-y-3`}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">چرخه ارسال و تحویل حواله‌ها</h4><input className={`${field} max-w-sm`} value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="جستجوی شماره، انبار، کالا یا تنوع"/></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">حواله‌های انتقال و پذیرش</h4><div className="flex flex-wrap gap-2"><input className={`${field} max-w-sm`} value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="جستجوی شماره، انبار، کالا یا تنوع"/><select className={`${field} max-w-xs`} value={transferStatusFilter} onChange={(event) => setTransferStatusFilter(event.target.value)}><option value="ALL">همه وضعیت‌ها</option><option value="DRAFT">پیش‌نویس</option><option value="SUBMITTED">در انتظار ارسال</option><option value="IN_TRANSIT">در مسیر</option><option value="PARTIALLY_RECEIVED">تحویل بخشی</option><option value="DISCREPANCY_REPORTED">دارای مغایرت</option><option value="RECEIVED">تحویل کامل</option><option value="COMPLETED">بسته‌شده</option><option value="CANCELLED">ابطال‌شده</option></select></div></div>
         <div className="space-y-2">{shownTransfers.slice(0, 100).map((transfer) => {
           const id = text(transfer.id); const status = text(transfer.status);
           const sourceName = text(transfer.source_warehouse_name, text(warehouses.find((warehouse) => text(warehouse.id) === text(transfer.source_warehouse_id))?.name, "مبدأ"));
@@ -604,6 +627,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
             <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-xs">
               <div className="min-w-0">
                 <strong>{text(transfer.transferNumber ?? transfer.transfer_number, "حواله")}</strong>
+                <span className="mx-1 text-slate-500">• {gregorianIsoToJalali(text(transfer.transferDate ?? transfer.transfer_date))}</span>
                 {" — "}{sourceName} ← {destinationName}
                 <span className="mx-1 rounded-full bg-slate-100 px-2 py-0.5">{transferStatusLabels[status] ?? status}</span>
                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
@@ -821,6 +845,15 @@ type ReturnLineDraft = {
 };
 
 type ReturnDraft = { type: "sales" | "purchases"; invoice: Row; lines: ReturnLineDraft[]; notes: string; return_date_jalali: string };
+type PurchaseTaxMode = "AUTO" | "PERCENT" | "AMOUNT";
+type PurchaseLineDraft = { product_id: string; variant_id: string; quantity: string; unit_price: string; discount_type: "FIXED" | "PERCENT"; discount_value: string; tax_rate: string };
+type PurchasePaymentDraft = { financial_account_id: string; payment_method: string; amount: string; reference_number: string };
+type PurchaseDraft = {
+  supplier_id: string; warehouse_id: string; document_date_jalali: string; due_date_jalali: string;
+  discount_total: string; shipping_cost: string; other_costs: string; rounding_adjustment: string;
+  tax_mode: PurchaseTaxMode; tax_rate: string; tax_amount: string; notes: string; receipt_url: string;
+  items: PurchaseLineDraft[];
+};
 
 export function CommerceParityPanel({
   orgId,
@@ -841,31 +874,112 @@ export function CommerceParityPanel({
   onToast: Toast;
   onRefresh: () => void;
 }) {
-  const [purchase, setPurchase] = useState({ supplier_id: "", warehouse_id: "", product_id: "", quantity: "1.0000", unit_price: "0.00", document_date_jalali: jalaliToday() });
+  const [purchase, setPurchase] = useState<PurchaseDraft>({
+    supplier_id: "", warehouse_id: "", document_date_jalali: jalaliToday(), due_date_jalali: "",
+    discount_total: "0.00", shipping_cost: "0.00", other_costs: "0.00", rounding_adjustment: "0.00",
+    tax_mode: "AUTO" as PurchaseTaxMode, tax_rate: "10.00", tax_amount: "0.00", notes: "", receipt_url: "",
+    items: [{ product_id: "", variant_id: "", quantity: "1.0000", unit_price: "0.00", discount_type: "FIXED" as const, discount_value: "0.00", tax_rate: "10.00" }],
+  });
+  const [variants, setVariants] = useState<Row[]>([]);
+  const [treasuryAccounts, setTreasuryAccounts] = useState<Row[]>([]);
+  const [paymentDraft, setPaymentDraft] = useState<PurchasePaymentDraft>({ financial_account_id: "", payment_method: "BANK_TRANSFER", amount: "", reference_number: "" });
+  const [paymentAllocations, setPaymentAllocations] = useState<PurchasePaymentDraft[]>([]);
+  const [purchaseBusy, setPurchaseBusy] = useState(false);
   const [returnDraft, setReturnDraft] = useState<ReturnDraft | null>(null);
   const suppliers = useMemo(() => contacts.filter((item) => ["SUPPLIER", "VENDOR"].includes(text(item.type ?? item.contactType).toUpperCase())), [contacts]);
   const returnable = (status: unknown) => ["CONFIRMED", "FINALIZED", "PARTIALLY_RETURNED"].includes(text(status));
 
   useEffect(() => {
-    setPurchase((current) => ({
-      ...current,
-      supplier_id: current.supplier_id || text(suppliers[0]?.id),
-      warehouse_id: current.warehouse_id || text(warehouses[0]?.id),
-      product_id: current.product_id || text(products[0]?.id),
-      unit_price: current.unit_price === "0.00" ? text(products[0]?.purchase_price, "0.00") : current.unit_price,
-    }));
-  }, [suppliers, warehouses, products]);
+    if (!orgId) return;
+    Promise.all([
+      apiFetch<Row[]>("/api/v1/variants?per_page=200", { organizationId: orgId }),
+      apiFetch<Row[]>("/api/v1/treasury/accounts", { organizationId: orgId }),
+    ]).then(([variantRows, accounts]) => {
+      setVariants(rows(variantRows));
+      setTreasuryAccounts(rows(accounts));
+      setPaymentDraft((current) => ({ ...current, financial_account_id: current.financial_account_id || text(accounts[0]?.id) }));
+    }).catch((error: unknown) => onToast(error instanceof Error ? error.message : "دریافت گزینه‌های فاکتور خرید ناموفق بود", "error"));
+  }, [orgId, onToast]);
 
-  async function createPurchase(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!orgId) return;
+  const purchaseNumber = (value: string) => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const purchaseLineDiscount = (line: PurchaseLineDraft) => {
+    const gross = purchaseNumber(line.quantity) * purchaseNumber(line.unit_price);
+    return line.discount_type === "PERCENT" ? gross * purchaseNumber(line.discount_value) / 100 : purchaseNumber(line.discount_value);
+  };
+  const purchaseSubtotal = purchase.items.reduce((sum, line) => sum + purchaseNumber(line.quantity) * purchaseNumber(line.unit_price), 0);
+  const purchaseLineDiscountTotal = purchase.items.reduce((sum, line) => sum + purchaseLineDiscount(line), 0);
+  const purchaseTaxableSubtotal = Math.max(0, purchaseSubtotal - purchaseLineDiscountTotal);
+  const purchaseTaxableAfterHeaderDiscount = Math.max(0, purchaseTaxableSubtotal - purchaseNumber(purchase.discount_total));
+  const automaticPurchaseTax = purchase.items.reduce((sum, line) => sum + Math.max(0, purchaseNumber(line.quantity) * purchaseNumber(line.unit_price) - purchaseLineDiscount(line)) * purchaseNumber(line.tax_rate) / 100, 0)
+    * (purchaseTaxableSubtotal > 0 ? purchaseTaxableAfterHeaderDiscount / purchaseTaxableSubtotal : 0);
+  const purchaseTax = purchase.tax_mode === "AUTO" ? automaticPurchaseTax : purchase.tax_mode === "PERCENT" ? purchaseTaxableAfterHeaderDiscount * purchaseNumber(purchase.tax_rate) / 100 : purchaseNumber(purchase.tax_amount);
+  const purchaseTotal = purchaseTaxableAfterHeaderDiscount + purchaseTax + purchaseNumber(purchase.shipping_cost) + purchaseNumber(purchase.other_costs) + purchaseNumber(purchase.rounding_adjustment);
+
+  function updatePurchaseLine(index: number, changes: Partial<PurchaseLineDraft>) {
+    setPurchase((current) => ({ ...current, items: current.items.map((line, i) => i === index ? { ...line, ...changes } : line) }));
+  }
+
+  function addPurchasePayment() {
+    if (purchaseNumber(paymentDraft.amount) <= 0) { onToast("مبلغ تسویه باید بزرگ‌تر از صفر باشد.", "error"); return; }
+    setPaymentAllocations((current) => [...current, { ...paymentDraft }]);
+    setPaymentDraft((current) => ({ ...current, amount: "", reference_number: "" }));
+  }
+
+  async function createPurchase(finalizeImmediately: boolean) {
+    if (!orgId || purchaseBusy) return;
+    const supplierId = purchase.supplier_id || text(suppliers[0]?.id);
+    const warehouseId = purchase.warehouse_id || text(warehouses[0]?.id);
+    const validItems = purchase.items.filter((line) => line.product_id && purchaseNumber(line.quantity) > 0 && purchaseNumber(line.unit_price) >= 0);
+    const subtotal = validItems.reduce((sum, line) => sum + purchaseNumber(line.quantity) * purchaseNumber(line.unit_price), 0);
+    const discountTotal = validItems.reduce((sum, line) => sum + purchaseLineDiscount(line), 0) + purchaseNumber(purchase.discount_total);
+    const otherCostTotal = purchaseNumber(purchase.other_costs) + purchaseNumber(purchase.rounding_adjustment);
+    const allocatedPayments = paymentAllocations.reduce((sum, item) => sum + purchaseNumber(item.amount), 0);
+    if (!supplierId || !warehouseId || !validItems.length) { onToast("تأمین‌کننده، انبار و دست‌کم یک قلم خرید معتبر را انتخاب کنید.", "error"); return; }
+    const invalidLineDiscount = validItems.some((line) => purchaseLineDiscount(line) > purchaseNumber(line.quantity) * purchaseNumber(line.unit_price));
+    if (invalidLineDiscount || discountTotal > subtotal || otherCostTotal < 0 || purchaseTotal <= 0) { onToast("تخفیف ردیف/فاکتور، هزینه‌های جانبی یا جمع نهایی معتبر نیست.", "error"); return; }
+    if (finalizeImmediately && allocatedPayments > purchaseTotal) { onToast("جمع تسویه‌ها نمی‌تواند از مبلغ نهایی فاکتور بیشتر شود.", "error"); return; }
+    setPurchaseBusy(true);
+    let savedDraftId = "";
     try {
-      await apiFetch("/api/v1/purchases", {
+      const invoice = await apiFetch<Row>("/api/v1/purchases", {
         method: "POST", organizationId: orgId, headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ supplier_id: purchase.supplier_id, warehouse_id: purchase.warehouse_id, document_date_jalali: purchase.document_date_jalali, items: [{ product_id: purchase.product_id, quantity: purchase.quantity, unit_price: purchase.unit_price }] }),
+        body: JSON.stringify({
+          supplier_id: supplierId,
+          warehouse_id: warehouseId,
+          document_date_jalali: purchase.document_date_jalali,
+          ...(purchase.due_date_jalali ? { due_date_jalali: purchase.due_date_jalali } : {}),
+          discount_total: purchase.discount_total,
+          tax_total: purchase.tax_mode === "AUTO" ? "0.00" : purchaseTax.toFixed(2),
+          tax_calculation_mode: purchase.tax_mode === "AUTO" ? "AUTO" : "OVERRIDE",
+          shipping_cost: purchase.shipping_cost,
+          other_costs: otherCostTotal.toFixed(2),
+          notes: purchase.notes,
+          receipt_url: purchase.receipt_url || null,
+          items: validItems.map((line) => {
+            const lineDiscount = purchaseLineDiscount(line);
+            return { product_id: line.product_id, variant_id: line.variant_id || null, quantity: line.quantity, unit_price: line.unit_price, discount_amount: lineDiscount.toFixed(2), tax_rate: line.tax_rate };
+          }),
+        }),
       });
-      onToast("پیش‌نویس خرید ساخته شد؛ پس از تأیید، ورود انبار و سند حسابداری به‌صورت اتمیک ثبت می‌شود.");
+      savedDraftId = text(invoice.id);
+      if (finalizeImmediately) {
+        if (!savedDraftId) throw new Error("پیش‌نویس ساخته شد اما شناسه فاکتور از سرور دریافت نشد.");
+        await apiFetch(`/api/v1/purchases/${savedDraftId}/confirm`, {
+          method: "POST", organizationId: orgId, headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ payment_allocations: paymentAllocations.map((item) => ({ financial_account_id: item.financial_account_id || null, payment_method: item.payment_method, amount: item.amount, reference_number: item.reference_number || null })) }),
+        });
+        onToast("فاکتور خرید تأیید شد؛ رسید انبار، پرداخت‌ها و سند حسابداری از مسیر اتمیک ثبت شدند.");
+      } else {
+        onToast("پیش‌نویس چندقلمی خرید ثبت شد؛ بعد از بازبینی می‌توانید ورود انبار و سند حسابداری را قطعی کنید.");
+      }
       onRefresh();
-    } catch (error) { onToast(error instanceof Error ? error.message : "ایجاد فاکتور خرید ناموفق بود", "error"); }
+    } catch (error) {
+      if (savedDraftId) {
+        onRefresh();
+        onToast(`پیش‌نویس ${savedDraftId.slice(0, 8)} ثبت شد، اما قطعی‌سازی کامل نشد: ${error instanceof Error ? error.message : "خطای ناشناخته"}`, "error");
+      } else onToast(error instanceof Error ? error.message : "ایجاد فاکتور خرید ناموفق بود", "error");
+    }
+    finally { setPurchaseBusy(false); }
   }
 
   async function openReturn(type: "sales" | "purchases", invoice: Row) {
@@ -914,15 +1028,56 @@ export function CommerceParityPanel({
   return (
     <section className="space-y-4 border-t border-slate-200 pt-5">
       <div><h3 className="text-sm font-bold">خرید و برگشت‌های تجاری</h3><p className="mt-1 text-xs text-slate-500">خرید دستی، برگشت جزئی یا کامل و ثبت اثر مالی/انبار از مسیر رسمی فاکتور</p></div>
-      <form onSubmit={createPurchase} className={`${card} grid grid-cols-1 gap-2 sm:grid-cols-3 lg:grid-cols-7`}>
-        <h4 className="sm:col-span-3 lg:col-span-7 text-xs font-bold">ایجاد فاکتور خرید</h4>
-        <select className={field} required value={purchase.supplier_id} onChange={(event) => setPurchase({ ...purchase, supplier_id: event.target.value })}><option value="">تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select>
-        <select className={field} required value={purchase.warehouse_id} onChange={(event) => setPurchase({ ...purchase, warehouse_id: event.target.value })}><option value="">انبار مقصد</option>{warehouses.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)}</option>)}</select>
-        <select className={field} required value={purchase.product_id} onChange={(event) => { const product = products.find((item) => text(item.id) === event.target.value); setPurchase({ ...purchase, product_id: event.target.value, unit_price: text(product?.purchase_price, purchase.unit_price) }); }}><option value="">کالا</option>{products.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)}</option>)}</select>
-        <input className={field} required dir="ltr" inputMode="decimal" aria-label="تعداد خرید" value={purchase.quantity} onChange={(event) => setPurchase({ ...purchase, quantity: event.target.value })}/>
-        <input className={field} required dir="ltr" inputMode="decimal" aria-label="قیمت خرید" value={purchase.unit_price} onChange={(event) => setPurchase({ ...purchase, unit_price: event.target.value })}/>
-        <label className="text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={purchase.document_date_jalali} onChange={(value) => setPurchase({ ...purchase, document_date_jalali: value })}/></label>
-        <button className={button}>ثبت پیش‌نویس خرید</button>
+      <form onSubmit={(event) => { event.preventDefault(); void createPurchase(false); }} className={`${card} space-y-4`}>
+        <div><h4 className="text-sm font-bold">ایجاد فاکتور خرید</h4><p className="mt-1 text-[11px] text-slate-500">چندقلمی، مالیات و تخفیف، پرداخت ترکیبی و ثبت ورود انبار در جریان واحد.</p></div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={purchase.supplier_id || text(suppliers[0]?.id)} onChange={(event) => setPurchase({ ...purchase, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label>
+          <label className="text-[11px]">انبار مقصد<select className={`${field} mt-1`} required value={purchase.warehouse_id || text(warehouses[0]?.id)} onChange={(event) => setPurchase({ ...purchase, warehouse_id: event.target.value })}><option value="">انتخاب انبار</option>{warehouses.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)}</option>)}</select></label>
+          <label className="text-[11px]">تاریخ فاکتور شمسی<JalaliDatePicker className="mt-1" value={purchase.document_date_jalali} onChange={(value) => setPurchase({ ...purchase, document_date_jalali: value })}/></label>
+          <label className="text-[11px]">سررسید شمسی<JalaliDatePicker className="mt-1" value={purchase.due_date_jalali} onChange={(value) => setPurchase({ ...purchase, due_date_jalali: value })} format="iso" allowEmpty placeholder="بدون سررسید"/></label>
+        </div>
+
+        <section className="space-y-3 rounded-xl border border-slate-100 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">اقلام فاکتور</strong><button type="button" onClick={() => setPurchase((current) => ({ ...current, items: [...current.items, { product_id: "", variant_id: "", quantity: "1.0000", unit_price: "0.00", discount_type: "FIXED", discount_value: "0.00", tax_rate: "10.00" }] }))} className="rounded-lg border border-slate-200 px-3 py-1.5 text-[11px]">افزودن قلم</button></div>
+          {purchase.items.map((line, index) => {
+            const lineVariants = variants.filter((variant) => text(variant.product_id ?? variant.productId) === line.product_id);
+            const lineAmount = Math.max(0, purchaseNumber(line.quantity) * purchaseNumber(line.unit_price) - purchaseLineDiscount(line));
+            return <div key={index} className="grid grid-cols-1 items-end gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-6">
+              <div className="sm:col-span-2"><label className="mb-1 block text-[10px] text-slate-500">کالا یا خدمت</label><ProductPickerModal products={products} value={line.product_id} onChange={(productId) => { const product = products.find((item) => text(item.id) === productId); updatePurchaseLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price, "0.00"), tax_rate: text(product?.tax_rate, "10.00") }); }} /></div>
+              <label className="text-[10px] text-slate-500">تنوع<select className={`${field} mt-1`} value={line.variant_id} onChange={(event) => { const variant = lineVariants.find((item) => text(item.id) === event.target.value); updatePurchaseLine(index, { variant_id: event.target.value, unit_price: text(variant?.purchase_price, line.unit_price) }); }}><option value="">کالای پایه</option>{lineVariants.map((variant) => <option key={text(variant.id)} value={text(variant.id)}>{text(variant.variant_name ?? variant.name)}{text(variant.sku) ? ` (${text(variant.sku)})` : ""}</option>)}</select></label>
+              <label className="text-[10px] text-slate-500">تعداد<input className={`${field} mt-1`} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updatePurchaseLine(index, { quantity: event.target.value })}/></label>
+              <label className="text-[10px] text-slate-500">قیمت خرید واحد<input className={`${field} mt-1`} required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updatePurchaseLine(index, { unit_price: event.target.value })}/></label>
+              <div className="flex items-end gap-1"><label className="min-w-0 flex-1 text-[10px] text-slate-500">تخفیف ردیف<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={line.discount_value} onChange={(event) => updatePurchaseLine(index, { discount_value: event.target.value })}/></label><button type="button" title={line.discount_type === "PERCENT" ? "درصد" : "مبلغ ثابت"} onClick={() => updatePurchaseLine(index, { discount_type: line.discount_type === "FIXED" ? "PERCENT" : "FIXED" })} className="mb-0.5 h-9 rounded-lg border bg-white px-2 text-[10px]">{line.discount_type === "PERCENT" ? "%" : "ریال"}</button></div>
+              <label className="text-[10px] text-slate-500">مالیات سطر (%)<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={line.tax_rate} onChange={(event) => updatePurchaseLine(index, { tax_rate: event.target.value })}/></label>
+              <div className="flex items-center justify-between gap-2 text-[10px] sm:col-span-2 xl:col-span-6"><span>خالص ردیف: {formatIrr(lineAmount.toFixed(2))} ریال</span><button type="button" disabled={purchase.items.length <= 1} onClick={() => setPurchase((current) => ({ ...current, items: current.items.filter((_, i) => i !== index) }))} className="text-rose-700 underline disabled:opacity-40">حذف قلم</button></div>
+            </div>;
+          })}
+        </section>
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label className="text-[11px]">تخفیف کل فاکتور<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.discount_total} onChange={(event) => setPurchase({ ...purchase, discount_total: event.target.value })}/></label>
+          <label className="text-[11px]">مالیات کل<select className={`${field} mt-1`} value={purchase.tax_mode} onChange={(event) => setPurchase({ ...purchase, tax_mode: event.target.value as PurchaseTaxMode })}><option value="AUTO">محاسبه از مالیات اقلام</option><option value="PERCENT">درصد سفارشی</option><option value="AMOUNT">مبلغ ثابت</option></select></label>
+          {purchase.tax_mode === "PERCENT" && <label className="text-[11px]">نرخ مالیات کل (%)<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.tax_rate} onChange={(event) => setPurchase({ ...purchase, tax_rate: event.target.value })}/></label>}
+          {purchase.tax_mode === "AMOUNT" && <label className="text-[11px]">مبلغ مالیات کل<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.tax_amount} onChange={(event) => setPurchase({ ...purchase, tax_amount: event.target.value })}/></label>}
+          <label className="text-[11px]">هزینه حمل<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.shipping_cost} onChange={(event) => setPurchase({ ...purchase, shipping_cost: event.target.value })}/></label>
+          <label className="text-[11px]">سایر هزینه‌ها<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.other_costs} onChange={(event) => setPurchase({ ...purchase, other_costs: event.target.value })}/></label>
+          <label className="text-[11px]">تعدیل رندکردن<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={purchase.rounding_adjustment} onChange={(event) => setPurchase({ ...purchase, rounding_adjustment: event.target.value })}/></label>
+          <label className="text-[11px]">لینک پیوست رسید<input className={`${field} mt-1`} dir="ltr" type="url" placeholder="https://..." value={purchase.receipt_url} onChange={(event) => setPurchase({ ...purchase, receipt_url: event.target.value })}/></label>
+          <label className="text-[11px] md:col-span-2 xl:col-span-4">یادداشت فاکتور<textarea rows={2} className={`${field} mt-1`} value={purchase.notes} onChange={(event) => setPurchase({ ...purchase, notes: event.target.value })}/></label>
+        </div>
+
+        <section className="space-y-3 rounded-xl border border-slate-100 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">پرداخت ترکیبی / تسویه</strong><span className="text-[10px] text-slate-500">این تسویه‌ها همراه «ثبت و تأیید خرید» وارد سند می‌شوند.</span></div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <select className={field} value={paymentDraft.payment_method} onChange={(event) => setPaymentDraft({ ...paymentDraft, payment_method: event.target.value })}><option value="BANK_TRANSFER">انتقال بانکی</option><option value="CASH">نقد</option><option value="BANK">بانک</option><option value="CARD_TERMINAL">کارت‌خوان</option><option value="POS">POS</option><option value="CHEQUE">چک</option><option value="CREDIT">نسیه</option><option value="ACCOUNT_BALANCE">از مانده حساب</option><option value="OTHER">سایر</option></select>
+            <select className={field} value={paymentDraft.financial_account_id} onChange={(event) => setPaymentDraft({ ...paymentDraft, financial_account_id: event.target.value })}><option value="">حساب خزانه (در صورت نیاز)</option>{treasuryAccounts.map((account) => <option key={text(account.id)} value={text(account.id)}>{text(account.name)} • {formatIrr(text(account.balance))} ریال</option>)}</select>
+            <input className={field} dir="ltr" inputMode="decimal" placeholder="مبلغ پرداختی" value={paymentDraft.amount} onChange={(event) => setPaymentDraft({ ...paymentDraft, amount: event.target.value })}/>
+            <div className="flex gap-2"><input className={field} placeholder="شماره پیگیری / چک" value={paymentDraft.reference_number} onChange={(event) => setPaymentDraft({ ...paymentDraft, reference_number: event.target.value })}/><button type="button" onClick={addPurchasePayment} className="shrink-0 rounded-xl border border-slate-200 px-3 text-[11px]">افزودن</button></div>
+          </div>
+          {paymentAllocations.map((item, index) => <div key={`${item.payment_method}-${index}`} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-[11px]"><span>{item.payment_method} • {text(treasuryAccounts.find((account) => text(account.id) === item.financial_account_id)?.name, "بدون حساب خزانه")} • {item.reference_number || "بدون پیگیری"}</span><span className="font-semibold">{formatIrr(item.amount)} ریال <button type="button" className="mr-2 text-rose-700 underline" onClick={() => setPaymentAllocations((current) => current.filter((_, i) => i !== index))}>حذف</button></span></div>)}
+        </section>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3"><div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-4"><span>جمع کالا: {formatIrr(purchaseSubtotal.toFixed(2))}</span><span>تخفیف اقلام: {formatIrr(purchaseLineDiscountTotal.toFixed(2))}</span><span>مالیات: {formatIrr(purchaseTax.toFixed(2))}</span><strong className="text-sm">جمع نهایی: {formatIrr(purchaseTotal.toFixed(2))} ریال</strong></div><div className="flex gap-2"><button type="submit" disabled={purchaseBusy} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold disabled:opacity-50">ذخیره پیش‌نویس</button><button type="button" disabled={purchaseBusy} onClick={() => void createPurchase(true)} className={`${button} px-4`}>{purchaseBusy ? "در حال ثبت…" : "ثبت و تأیید خرید"}</button></div></div>
       </form>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {([["sales", sales], ["purchases", purchases]] as const).map(([type, invoices]) => <div key={type} className={`${card} space-y-2`}><h4 className="text-xs font-bold">برگشت {type === "sales" ? "از فروش" : "از خرید"}</h4>{invoices.filter((invoice) => returnable(invoice.status)).map((invoice) => <div key={text(invoice.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-xs"><span>{invoiceName(invoice, type)} • {formatIrr(text(invoice.grand_total))} ریال</span><button className="rounded-lg border border-slate-200 px-3 py-1.5" type="button" onClick={() => void openReturn(type, invoice)}>ثبت برگشت</button></div>)}{!invoices.some((invoice) => returnable(invoice.status)) && <div className="text-xs text-slate-500">فاکتور قطعیِ قابل برگشت ندارید.</div>}</div>)}

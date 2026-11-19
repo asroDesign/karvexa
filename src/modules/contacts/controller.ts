@@ -50,8 +50,8 @@ const createContactSchema = z.object({
 });
 
 const createProductSchema = z.object({
-  code: z.string().min(2).optional(),
-  sku: z.string().min(2).optional(),
+  code: z.string().min(2).optional().or(z.literal("")),
+  sku: z.string().min(2).optional().or(z.literal("")),
   name: z.string().min(2),
   description: z.string().optional(),
   item_type: z.enum(["PRODUCT", "SERVICE", "RAW_MATERIAL", "FINISHED_PRODUCT", "GOODS", "CONSIGNMENT"]).default("PRODUCT"),
@@ -66,6 +66,7 @@ const createProductSchema = z.object({
   maximum_stock: z.string().regex(/^\d+(\.\d{1,4})?$/).default("0.0000"),
   track_inventory: z.boolean().default(true),
   allow_negative_stock: z.boolean().default(false),
+  is_active: z.boolean().default(true),
   costing_method: z.enum(["FIFO", "WEIGHTED_AVERAGE"]).default("WEIGHTED_AVERAGE"),
   attributes: z.record(z.string(), z.unknown()).default({}),
 });
@@ -493,10 +494,7 @@ export async function handleCatalogRoutes(
   if (root === "products" && method === "POST" && !id) {
     const ctx = await requireOrgContext(req, "catalog.create", { requireActiveSubscription: true });
     const body = createProductSchema.parse(await req.json());
-    const sku = (body.code || body.sku || "").trim();
-    if (sku.length < 2) {
-      throw new ApiError(422, "VALIDATION_ERROR", "کد کالا (code/sku) الزامی است.");
-    }
+    const sku = (body.code || body.sku || "").trim() || `KXV-${crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;
 
     const created = await db.transaction(async (tx) => {
       const [prod] = await tx
@@ -517,6 +515,7 @@ export async function handleCatalogRoutes(
           maxStockLevel: body.maximum_stock,
           trackInventory: body.track_inventory,
           allowNegativeStock: body.allow_negative_stock,
+          isActive: body.is_active,
           costingMethod: body.costing_method,
           attributes: body.attributes,
           syncSeq: Date.now(),

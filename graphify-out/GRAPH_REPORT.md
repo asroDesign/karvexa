@@ -1,17 +1,17 @@
 # Graph Report - karvexa  (2026-11-19)
 
 ## Corpus Check
-- 162 files · ~199,060 words
+- 163 files · ~201,962 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 3 file(s) not represented in the graph (top: (none) 1, .ico 1, .css 1)
 
 ## Summary
-- 1433 nodes · 4757 edges · 132 communities (77 shown, 55 thin omitted)
+- 1443 nodes · 4781 edges · 129 communities (76 shown, 53 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 27 edges (avg confidence: 0.91)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `d835db24`
+- Built from commit: `96e0bcbb`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -23,16 +23,16 @@
 - auth/controller.ts
 - v1-router/route.ts
 - schema.ts
-- BusinessParityPanels.tsx
+- BusinessSupportTickets.tsx
 - gregorianIsoToJalali
 - OrgWorkspace.tsx
 - tenant.ts
 - subscription/controller.ts
-- errors.ts
+- paymentGatewaySettings
 - zod
 - TypeScript Configuration
 - Accounting and Reports
-- next
+- tenant.ts
 - auth/controller.ts
 - Sync Conflict Handling
 - Runtime Dependencies
@@ -49,7 +49,7 @@
 - API Request Examples
 - Financial Dashboard Metrics
 - Crash, Network, and Multi-Device Recovery Strategy
-- audit.ts
+- seed-saas.ts
 - API Versioning Policy
 - Server-Authoritative Database
 - Shared Field Dictionary
@@ -62,7 +62,6 @@
 - Crypto and Spreadsheet Exports
 - Journal Posting Rules
 - Brand Typography
-- dependencies
 - Android Room Sync Protocol
 - Personal Finance Ledger
 - Graph first codebase exploration
@@ -77,7 +76,6 @@
 - Platform API Access Matrix
 - Treasury and Cheque Rules
 - Domain-Based Conflict Resolution Policy
-- changelog.ts
 - Android Offline-First API Consumption
 - Cross platform API, offline sync, and accounting flows
 - Room and PostgreSQL Mapping
@@ -86,7 +84,6 @@
 - Change Log and Pull Cursor
 - Database Platform Schema
 - scripts
-- postcss@8.5.23
 - Purchase Document Mapping
 - Sales Document Mapping
 - xlsx
@@ -179,79 +176,79 @@
 - **Subscription Upgrade and Verification Flow** — docs_contracts_payment_flow_contract_subscription_upgrade_initiation, docs_contracts_payment_flow_contract_payment_gateway_callback_verification, docs_contracts_payment_flow_contract_authoritative_subscription_refresh [EXTRACTED 1.00]
 - **Bidirectional Sync Entity Manifest** — docs_sync_sync_entity_manifest_contact, docs_sync_sync_entity_manifest_product, docs_sync_sync_entity_manifest_product_variant, docs_sync_sync_entity_manifest_warehouse, docs_sync_sync_entity_manifest_branch, docs_sync_sync_entity_manifest_cost_center, docs_sync_sync_entity_manifest_account_code, docs_sync_sync_entity_manifest_treasury_account, docs_sync_sync_entity_manifest_treasury_transaction, docs_sync_sync_entity_manifest_cheque, docs_sync_sync_entity_manifest_journal_entry, docs_sync_sync_entity_manifest_sales, docs_sync_sync_entity_manifest_purchase, docs_sync_sync_entity_manifest_consignment, docs_sync_sync_entity_manifest_quick_cashflow, docs_sync_sync_entity_manifest_personal_transaction, docs_sync_sync_entity_manifest_owner_withdrawal, docs_sync_sync_entity_manifest_employee [EXTRACTED 1.00]
 
-## Communities (132 total, 55 thin omitted)
+## Communities (129 total, 53 thin omitted)
 
 ### Community 0 - "ApiError"
-Cohesion: 0.06
-Nodes (187): accountGroups, accountingCategories, accountingPeriods, accountingPolicies, accounts, branches, categoryAccountMappings, chequeEvents (+179 more)
+Cohesion: 0.07
+Nodes (171): POST(), POST(), accountingPeriods, accounts, cheques, consignmentDocuments, consignmentItems, contacts (+163 more)
 
 ### Community 1 - "sync/service.ts"
-Cohesion: 0.06
-Nodes (53): AdvancedModulesPanel(), handleConvertQuotation(), handleConvertSuggestionToPo(), handleCreateAndConfirmMixedSale(), handleCreateEmployee(), handleCreateQuotation(), handleCreateRecurring(), handleCreateVariantWithOpeningStock() (+45 more)
+Cohesion: 0.05
+Nodes (63): AppPortalPage(), dynamic, AdvancedModulesPanel(), handleConvertQuotation(), handleConvertSuggestionToPo(), handleCreateAndConfirmMixedSale(), handleCreateEmployee(), handleCreateQuotation() (+55 more)
 
 ### Community 2 - "package.json"
-Cohesion: 0.12
-Nodes (23): devDependencies, drizzle-kit@0.31.10, eslint@9.39.4, eslint-config-next@16.4.2, tailwindcss@4.1.17, @tailwindcss/postcss@4.1.17, @types/node@22.19.15, @types/pg@8.18.0 (+15 more)
+Cohesion: 0.06
+Nodes (43): dependencies, bcryptjs@^3.0.3, dotenv@17.3.1, drizzle-orm@0.45.2, lucide-react@^1.73.0, next@16.4.2, pg@8.20.0, react@19.2.6 (+35 more)
 
 ### Community 3 - "apiFetch"
-Cohesion: 0.14
-Nodes (38): createArticleSchema, DELETE(), GET(), PATCH(), patchArticleSchema, POST(), GET(), GET() (+30 more)
+Cohesion: 0.12
+Nodes (47): GET(), createArticleSchema, DELETE(), GET(), PATCH(), patchArticleSchema, POST(), GET() (+39 more)
 
 ### Community 4 - "auth/controller.ts"
-Cohesion: 0.08
-Nodes (42): AccountingParityPanel(), createCenter(), CommerceParityPanel(), createPurchase(), openReturn(), submitReturn(), downloadReport(), InventoryParityPanel() (+34 more)
+Cohesion: 0.06
+Nodes (50): AccountingParityPanel(), createCenter(), CommerceParityPanel(), createPurchase(), openReturn(), submitReturn(), downloadReport(), InventoryParityPanel() (+42 more)
 
 ### Community 5 - "v1-router/route.ts"
-Cohesion: 0.24
-Nodes (22): DELETE(), dispatch(), dynamic, extractSegments(), GET(), PATCH(), POST(), PUT() (+14 more)
+Cohesion: 0.14
+Nodes (28): DELETE(), dispatch(), dynamic, extractSegments(), GET(), PATCH(), POST(), PUT() (+20 more)
 
 ### Community 6 - "schema.ts"
 Cohesion: 0.06
-Nodes (44): GET(), accountClosures, bankReconciliations, barcodes, brands, cashboxes, categories, chequeAssignments (+36 more)
+Nodes (52): accountClosures, accountGroups, accountingCategories, accountingPolicies, bankReconciliations, barcodes, branches, brands (+44 more)
 
-### Community 7 - "BusinessParityPanels.tsx"
-Cohesion: 0.19
-Nodes (17): lucide-react, AboutPage(), AcademyIndexPage(), dynamic, AcademyArticleDetailPage(), dynamic, ContactPage(), dynamic (+9 more)
+### Community 7 - "BusinessSupportTickets.tsx"
+Cohesion: 0.17
+Nodes (10): BusinessSupportTickets(), sendReply(), Department, Detail, Event, Message, priorityFa, statusFa (+2 more)
 
 ### Community 8 - "gregorianIsoToJalali"
-Cohesion: 0.26
-Nodes (18): fa(), JalaliDatePicker(), JalaliMonthPicker(), jalaliToIsoSafe(), MONTHS, normalizeJalali(), pad(), valueToJalali() (+10 more)
+Cohesion: 0.13
+Nodes (28): AdvancedModulesPanelProps, AdvancedSubTab, fa(), JalaliDatePicker(), JalaliMonthPicker(), jalaliToIsoSafe(), MONTHS, normalizeJalali() (+20 more)
 
 ### Community 9 - "OrgWorkspace.tsx"
-Cohesion: 0.08
-Nodes (27): BusinessSupportTickets(), sendReply(), Department, Detail, Event, Message, priorityFa, statusFa (+19 more)
+Cohesion: 0.13
+Nodes (16): Agent, Department, Detail, Event, eventLabel, Message, PlatformTicketDesk(), saveRouting() (+8 more)
 
 ### Community 10 - "tenant.ts"
-Cohesion: 0.13
-Nodes (23): GET(), PATCH(), toggleSchema, createUserSchema, GET(), POST(), organizationMembers, organizations (+15 more)
+Cohesion: 0.14
+Nodes (16): toggleSchema, createUserSchema, auditLogs, permissions, rolePermissions, roles, userInvitations, userRoles (+8 more)
 
 ### Community 11 - "subscription/controller.ts"
 Cohesion: 0.21
-Nodes (21): devices, checkIdempotency(), saveIdempotency(), handleCloudMigrationRoutes(), addRecurrenceInterval(), handlePersonalFinanceRoutes(), ALLOWED_MIMES, formatConflictRecord() (+13 more)
+Nodes (17): handleCloudMigrationRoutes(), formatConflictRecord(), handleSyncRoutes(), decodeSyncCursor(), encodeSyncCursor(), acknowledgeSyncCursor(), ensureOrgChangeLogBaseline(), findMissingDependency() (+9 more)
 
-### Community 12 - "errors.ts"
-Cohesion: 0.13
-Nodes (13): PlatformSaasAdmin(), deleteArticle(), saveArticle(), saveSmsProvider(), updateInquiryStatus(), PlatformSaasAdminProps, RichTextEditor(), handleInsertImageUrl() (+5 more)
+### Community 12 - "paymentGatewaySettings"
+Cohesion: 0.53
+Nodes (3): paymentGatewaySettings, paymentOrders, PaymentGatewayAdapter
 
 ### Community 13 - "zod"
 Cohesion: 0.11
 Nodes (22): Account Code Sync Entity, Branch Sync Entity, Cheque Sync Entity, Consignment Document Sync Entity, Contact Sync Entity, Cost Center Sync Entity, Employee Sync Entity, Journal Entry Sync Entity (+14 more)
 
 ### Community 14 - "TypeScript Configuration"
-Cohesion: 0.11
-Nodes (23): notifications, paymentGatewaySettings, paymentOrders, ensureSaasSeeded(), resolveOrganizationEntitlements(), ballehPayAdapter, buildSignedEntitlementSnapshot(), GATEWAY_ADAPTERS (+15 more)
+Cohesion: 0.15
+Nodes (21): files, notifications, resolveOrganizationEntitlements(), ballehPayAdapter, buildSignedEntitlementSnapshot(), GATEWAY_ADAPTERS, GatewayInitResult, GatewayVerifyResult (+13 more)
 
 ### Community 15 - "Accounting and Reports"
-Cohesion: 0.10
-Nodes (29): drizzle-orm, dynamic, dynamic, messageSchema, POST(), RouteContext, GET(), PATCH() (+21 more)
+Cohesion: 0.09
+Nodes (33): nextConfig, drizzle-orm, next, zod, dynamic, dynamic, dynamic, patchErrorSchema (+25 more)
 
-### Community 16 - "next"
-Cohesion: 0.22
-Nodes (8): nextConfig, next, zod, overrideEntitlementSchema, dynamic, features, planFeatures, plans
+### Community 16 - "tenant.ts"
+Cohesion: 0.18
+Nodes (17): createOrgSchema, patchOrgSchema, overrideEntitlementSchema, dynamic, entitlements, features, organizationMembers, organizations (+9 more)
 
 ### Community 17 - "auth/controller.ts"
 Cohesion: 0.11
-Nodes (35): sessions, bootstrapOrganizationDefaults(), dayBeforeIso(), ensurePrompt05Seeded(), runSeed(), ACCESS_COOKIE_NAME, AccessTokenPayload, attachAuthCookies() (+27 more)
+Nodes (36): fiscalYears, sessions, syncCheckpoints, ensurePrompt05Seeded(), runSeed(), ACCESS_COOKIE_NAME, AccessTokenPayload, attachAuthCookies() (+28 more)
 
 ### Community 18 - "Sync Conflict Handling"
 Cohesion: 0.10
@@ -274,20 +271,20 @@ Cohesion: 0.15
 Nodes (16): Base Version Conflict Detection, Dependency Validation, Idempotency Key, sync_inbox, Sync Telemetry, Financial Immutability Conflict, FINANCIAL_IMMUTABLE Conflict, Mandatory Sync, Data & Financial Integration Test Cases (+8 more)
 
 ### Community 23 - "layout.tsx"
-Cohesion: 0.19
-Nodes (10): metadata, RootLayout(), vazirmatn, PwaRegistration(), ThemeContext, ThemeContextValue, ThemePreference, ThemeProvider() (+2 more)
+Cohesion: 0.36
+Nodes (5): metadata, RootLayout(), vazirmatn, PwaRegistration(), ThemeProvider()
 
 ### Community 24 - "OrgWorkspace.tsx"
-Cohesion: 0.15
-Nodes (20): react, recharts, AdvancedModulesPanelProps, AdvancedSubTab, FiscalLifecyclePanelProps, DateRangeKey, GlassDashboard(), GlassDashboardProps (+12 more)
+Cohesion: 0.09
+Nodes (38): lucide-react, react, AboutPage(), AcademyIndexPage(), AcademyArticleDetailPage(), dynamic, ContactPage(), SaasHomePage() (+30 more)
 
 ### Community 25 - "sms/service.ts"
-Cohesion: 0.21
-Nodes (14): otpCodes, smsLogs, smsSettings, DEFAULT_ACADEMY_ARTICLES, DEFAULT_PAYMENT_GATEWAYS, DEFAULT_SMS_PROVIDERS, sha256(), issueOtpCode() (+6 more)
+Cohesion: 0.33
+Nodes (10): otpCodes, smsLogs, ensureSaasSeeded(), issueOtpCode(), normalizeIranDigits(), normalizeIranMobile(), resolveProviderConfig(), sendSmsViaGateway() (+2 more)
 
 ### Community 26 - "Roles and Permissions"
-Cohesion: 0.14
-Nodes (13): AppPortalPage(), dynamic, BusinessOsShell(), handleLogout(), switchOrg(), LoginView(), doLogin(), requestOtp() (+5 more)
+Cohesion: 0.22
+Nodes (8): LoginView(), doLogin(), requestOtp(), submitOtp(), LoginViewProps, PRESENTATION_SLIDES, PresentationSlide, SlideVisualStage()
 
 ### Community 27 - "Server Sync Persistence"
 Cohesion: 0.18
@@ -313,9 +310,9 @@ Nodes (13): Room Sync Outbox, Transactional Sync Outbox, Pull Cursor Recovery, I
 Cohesion: 0.25
 Nodes (10): idx_support_ticket_departments_active_order, idx_support_ticket_events_ticket_created, idx_support_ticket_messages_ticket_created, idx_support_tickets_department_activity, idx_support_tickets_org_activity, idx_support_tickets_status_activity, support_ticket_departments, support_ticket_events (+2 more)
 
-### Community 33 - "audit.ts"
-Cohesion: 0.19
-Nodes (10): GET(), GET(), auditLogs, entitlements, paymentTransactions, purchaseReceipts, subscriptions, recordSystemError() (+2 more)
+### Community 33 - "seed-saas.ts"
+Cohesion: 0.40
+Nodes (4): smsSettings, DEFAULT_ACADEMY_ARTICLES, DEFAULT_PAYMENT_GATEWAYS, DEFAULT_SMS_PROVIDERS
 
 ### Community 34 - "API Versioning Policy"
 Cohesion: 0.17
@@ -365,10 +362,6 @@ Nodes (9): Contact Fields, Shared Field Dictionary, Sales and Purchase Invoice F
 Cohesion: 0.20
 Nodes (10): Advanced Accounting Extensions, Atomic User and Organization Registration, Backend Extension Audit, Modular Monolith Backend Baseline, Consignment Ledger Extension, Backend Extension Gaps, Personal Transfer Endpoint, Item-Level Sales and Purchase Returns (+2 more)
 
-### Community 46 - "dependencies"
-Cohesion: 0.12
-Nodes (17): dependencies, bcryptjs@^3.0.3, dotenv@17.3.1, drizzle-orm@0.45.2, lucide-react@^1.73.0, next@16.4.2, pg@8.20.0, react@19.2.6 (+9 more)
-
 ### Community 47 - "Android Room Sync Protocol"
 Cohesion: 0.25
 Nodes (9): Brands, Categories, Product Units, Products, Stock Document Items, Stock Documents, Stock Ledger, Units (+1 more)
@@ -386,8 +379,8 @@ Cohesion: 0.22
 Nodes (9): Organization Membership and Device Authorization, Role-Based Access Control (RBAC), Tenant Transaction, Device Revocation, Tenant Isolation & RBAC, Scenario I — RBAC, Scenario K — Tenant Isolation, Security Audit Logs (+1 more)
 
 ### Community 51 - "errors.ts"
-Cohesion: 0.20
-Nodes (8): CONTRACT_FILES, GET(), camelToSnakeKey(), ErrorDetailItem, ListQueryParams, newRequestId(), okNoContent(), toSnakeCase()
+Cohesion: 0.15
+Nodes (10): CONTRACT_FILES, patchSettingSchema, platformSettings, camelToSnakeKey(), ErrorDetailItem, ListQueryParams, newRequestId(), okNoContent() (+2 more)
 
 ### Community 52 - "Invitation Security"
 Cohesion: 0.46
@@ -491,8 +484,8 @@ Nodes (3): Allowed Manual Resolutions, Conflict Resolution API, Conflict Resolut
 
 ## Knowledge Gaps
 - **231 isolated node(s):** `PostgreSQL Sync Conflicts`, `Sync Change Log`, `Accounting Core Module`, `Audit Core Module`, `Catalog Core Module` (+226 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 481 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **55 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 488 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **53 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Work-memory lessons
 
@@ -502,17 +495,17 @@ Nodes (3): Allowed Manual Resolutions, Conflict Resolution API, Conflict Resolut
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `next` connect `next` to `ApiError`, `audit.ts`, `package.json`, `apiFetch`, `v1-router/route.ts`, `schema.ts`, `BusinessParityPanels.tsx`, `tenant.ts`, `subscription/controller.ts`, `dependencies`, `Accounting and Reports`, `auth/controller.ts`, `errors.ts`, `layout.tsx`, `OrgWorkspace.tsx`, `Roles and Permissions`?**
-  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+- **Why does `next` connect `Accounting and Reports` to `ApiError`, `package.json`, `apiFetch`, `v1-router/route.ts`, `schema.ts`, `gregorianIsoToJalali`, `tenant.ts`, `TypeScript Configuration`, `tenant.ts`, `auth/controller.ts`, `errors.ts`, `layout.tsx`, `OrgWorkspace.tsx`, `Roles and Permissions`?**
+  _High betweenness centrality (0.053) - this node is a cross-community bridge._
 - **What connects `PostgreSQL Sync Conflicts`, `Sync Change Log`, `Accounting Core Module` to the rest of the system?**
   _231 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `ApiError` be split into smaller, more focused modules?**
-  _Cohesion score 0.06073823929459218 - nodes in this community are weakly interconnected._
-- **Why does `apiFetch()` connect `sync/service.ts` to `auth/controller.ts`, `BusinessParityPanels.tsx`, `OrgWorkspace.tsx`, `errors.ts`, `layout.tsx`, `OrgWorkspace.tsx`, `Roles and Permissions`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
+  _Cohesion score 0.06928965439603738 - nodes in this community are weakly interconnected._
+- **Why does `ApiError` connect `ApiError` to `apiFetch`, `v1-router/route.ts`, `schema.ts`, `gregorianIsoToJalali`, `tenant.ts`, `subscription/controller.ts`, `TypeScript Configuration`, `Accounting and Reports`, `tenant.ts`, `auth/controller.ts`, `errors.ts`, `sms/service.ts`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
 - **Should `sync/service.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.0647307924984876 - nodes in this community are weakly interconnected._
-- **Why does `ApiError` connect `ApiError` to `audit.ts`, `apiFetch`, `v1-router/route.ts`, `schema.ts`, `tenant.ts`, `subscription/controller.ts`, `TypeScript Configuration`, `Accounting and Reports`, `next`, `auth/controller.ts`, `errors.ts`, `sms/service.ts`, `changelog.ts`?**
-  _High betweenness centrality (0.033) - this node is a cross-community bridge._
+  _Cohesion score 0.0502283105022831 - nodes in this community are weakly interconnected._
+- **Why does `apiFetch()` connect `sync/service.ts` to `auth/controller.ts`, `BusinessSupportTickets.tsx`, `gregorianIsoToJalali`, `OrgWorkspace.tsx`, `OrgWorkspace.tsx`, `Roles and Permissions`?**
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
 - **Should `package.json` be split into smaller, more focused modules?**
-  _Cohesion score 0.11666666666666667 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06262626262626263 - nodes in this community are weakly interconnected._

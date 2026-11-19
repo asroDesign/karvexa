@@ -217,10 +217,10 @@
     "semantic_hash": "cd2a0bece19933f3cd2aa0acdd6463ff"
   },
   "src/components/AdvancedModulesPanel.tsx": {
-    "mtime": 1795017419.3640578,
-    "seen": 1795024602.386174,
-    "ast_hash": "c332a8b9a8bffbb32a7645130c66f289",
-    "semantic_hash": "c332a8b9a8bffbb32a7645130c66f289"
+    "mtime": 1795094901.6119514,
+    "seen": 1795096832.987803,
+    "ast_hash": "1306d73f25e893a79580feda3eeed014",
+    "semantic_hash": ""
   },
   "src/components/BusinessOsShell.tsx": {
     "mtime": 1795041086.2575915,
@@ -247,10 +247,10 @@
     "semantic_hash": "ff756820a2e3b00562e5f6c9db8dd0a6"
   },
   "src/components/OrgWorkspace.tsx": {
-    "mtime": 1795022761.9245212,
-    "seen": 1795024602.386223,
-    "ast_hash": "5608010ee62aceae7784c158a7324748",
-    "semantic_hash": "5608010ee62aceae7784c158a7324748"
+    "mtime": 1795094187.53676,
+    "seen": 1795096832.987812,
+    "ast_hash": "cb038f7e4d7c8946f786db686786a33f",
+    "semantic_hash": ""
   },
   "src/components/PlatformAdminPortal.tsx": {
     "mtime": 1795022761.926827,
@@ -409,10 +409,10 @@
     "semantic_hash": "b780575497f5ef5517e18c16e86b3287"
   },
   "src/modules/commerce/controller.ts": {
-    "mtime": 1794996615.515626,
-    "seen": 1795024602.386848,
-    "ast_hash": "98c575df1b2a682d9c2019963dadfded",
-    "semantic_hash": "98c575df1b2a682d9c2019963dadfded"
+    "mtime": 1795097225.873052,
+    "seen": 1795097331.168418,
+    "ast_hash": "37e816492b591743940c09e43200ef5c",
+    "semantic_hash": ""
   },
   "src/modules/commerce/lifecycle.service.ts": {
     "mtime": 1794996567.585306,
@@ -433,10 +433,10 @@
     "semantic_hash": "6ec173113ea09f0895d51b4534da6f70"
   },
   "src/modules/contacts/controller.ts": {
-    "mtime": 1794905442.0,
-    "seen": 1794930384.47122,
-    "ast_hash": "cf1e121a5b11b8e98a06fb1ddaf335fb",
-    "semantic_hash": "cf1e121a5b11b8e98a06fb1ddaf335fb"
+    "mtime": 1795094286.99437,
+    "seen": 1795096832.98785,
+    "ast_hash": "82660e4e4421d2b938e6acc3e772635f",
+    "semantic_hash": ""
   },
   "src/modules/dashboard/controller.ts": {
     "mtime": 1794905442.0,
@@ -457,10 +457,10 @@
     "semantic_hash": "294ce640f588e26de680732ce30420a7"
   },
   "src/modules/inventory/controller.ts": {
-    "mtime": 1795030124.7196932,
-    "seen": 1795042475.974738,
-    "ast_hash": "9be95e82c2625cc00b3df4fa3b076a7f",
-    "semantic_hash": "9be95e82c2625cc00b3df4fa3b076a7f"
+    "mtime": 1795097083.3883033,
+    "seen": 1795097165.502523,
+    "ast_hash": "10ae18909db72a9b9aafe31b7d900cb0",
+    "semantic_hash": ""
   },
   "src/modules/inventory/prompt08.service.ts": {
     "mtime": 1795030097.9205856,
@@ -469,10 +469,10 @@
     "semantic_hash": "5bd2c293aa6df247eeb1c40afd696ccd"
   },
   "src/modules/inventory/service.ts": {
-    "mtime": 1794995581.3577628,
-    "seen": 1795024602.386993,
-    "ast_hash": "fc298a9b3046c556097b529f02ee76b7",
-    "semantic_hash": "fc298a9b3046c556097b529f02ee76b7"
+    "mtime": 1795097106.4476852,
+    "seen": 1795097165.5025249,
+    "ast_hash": "807f085eedb1b19c528ef27261fba1e4",
+    "semantic_hash": ""
   },
   "src/modules/offline-mode/controller.ts": {
     "mtime": 1795033309.8199935,
@@ -901,10 +901,10 @@
     "semantic_hash": "fa38e782c4f127d137afb0f5faa6fbc4"
   },
   "src/components/BusinessParityPanels.tsx": {
-    "mtime": 1795031167.7016659,
-    "seen": 1795042475.972812,
-    "ast_hash": "1503f374360e90ef4ec11bced2f28336",
-    "semantic_hash": "1503f374360e90ef4ec11bced2f28336"
+    "mtime": 1795097251.6360514,
+    "seen": 1795097331.1683772,
+    "ast_hash": "b9b4fe9a34fc83dddf8fc0173f78d07c",
+    "semantic_hash": ""
   },
   "src/components/PwaRegistration.tsx": {
     "mtime": 1794991124.0915751,
@@ -989,6 +989,12 @@
     "seen": 1795042475.973431,
     "ast_hash": "30b318ec54df9375138d6b0f04df6c6d",
     "semantic_hash": "30b318ec54df9375138d6b0f04df6c6d"
+  },
+  "src/components/ProductPickerModal.tsx": {
+    "mtime": 1795093411.9424038,
+    "seen": 1795096832.9878159,
+    "ast_hash": "caba99d141fe5e53e3487989071d197a",
+    "semantic_hash": ""
   },
   "yarn.lock": {
     "mtime": 1794689386.355159,

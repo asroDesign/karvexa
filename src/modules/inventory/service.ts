@@ -497,7 +497,7 @@ export async function approveStockCount(params: {
   warehouseId: string;
   countDate: string;
   notes?: string;
-  items: Array<{ productId: string; countedQty: string }>;
+  items: Array<{ productId: string; countedQty: string; adjustmentQuantity?: string; adjustmentDirection?: "IN" | "OUT" }>;
   actorUserId: string;
   actorEmail: string;
   ipAddress?: string | null;
@@ -550,9 +550,13 @@ export async function approveStockCount(params: {
         throw new ApiError(409, "BACKDATED_STOCK_COUNT_NOT_SUPPORTED", "تاریخ انبارگردانی از آخرین گردش ثبت‌شده کالا قدیمی‌تر است؛ موجودی را در تاریخ جاری انبارگردانی کنید.");
       }
       const product = scopedProducts.find((entry) => entry.id === item.productId)!;
-      const counted = parseDecimal(item.countedQty);
+      const counted = item.adjustmentQuantity !== undefined
+        ? item.adjustmentDirection === "OUT"
+          ? subDec(current.qty, parseDecimal(item.adjustmentQuantity))
+          : addDec(current.qty, parseDecimal(item.adjustmentQuantity))
+        : parseDecimal(item.countedQty);
       if (isNegativeDec(counted)) {
-        throw new ApiError(422, "COUNTED_QTY_NEGATIVE", "مقدار شمارش‌شده نمی‌تواند منفی باشد.");
+        throw new ApiError(422, "COUNTED_QTY_NEGATIVE", "موجودی نهایی پس از شمارش یا تعدیل نمی‌تواند منفی باشد.");
       }
       const variance = subDec(counted, current.qty);
       evaluatedItems.push({

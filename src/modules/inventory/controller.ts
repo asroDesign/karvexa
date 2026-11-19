@@ -97,7 +97,11 @@ const countSchema = z.object({
         product_id: z.string().uuid(),
         counted_qty: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
         quantity: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
-      })
+        adjustment_quantity: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
+        adjustment_direction: z.enum(["IN", "OUT"]).optional(),
+      }).refine((item) => item.adjustment_quantity !== undefined
+        ? item.adjustment_direction !== undefined && Number(item.adjustment_quantity) > 0 && item.counted_qty === undefined && item.quantity === undefined
+        : item.adjustment_direction === undefined && (item.counted_qty !== undefined || item.quantity !== undefined), "برای هر قلم یا مقدار شمارش نهایی یا مقدار و جهت تعدیل لازم است.")
     )
     .min(1),
 });
@@ -865,6 +869,10 @@ export async function handleWarehouseAndInventoryRoutes(
       if (method === "POST" && !seg2) {
         const ctx = await requireOrgContext(req, "inventory.count.confirm", { requireActiveSubscription: true });
         const body = countSchema.parse(await req.json());
+        const idemKey = req.headers.get("idempotency-key");
+        const endpoint = "/api/v1/inventory/counts";
+        const cached = await checkIdempotency({ organizationId: ctx.organizationId, key: idemKey, endpoint, payload: body });
+        if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
         const res = await approveStockCount({
           organizationId: ctx.organizationId,
           warehouseId: body.warehouse_id,
@@ -873,11 +881,13 @@ export async function handleWarehouseAndInventoryRoutes(
           items: body.items.map((i) => ({
             productId: i.product_id,
             countedQty: i.counted_qty ?? i.quantity ?? "0.0000",
+            ...(i.adjustment_quantity !== undefined ? { adjustmentQuantity: i.adjustment_quantity, adjustmentDirection: i.adjustment_direction! } : {}),
           })),
           actorUserId: ctx.userId,
           actorEmail: ctx.email,
           ipAddress: ctx.ipAddress,
         });
+        await saveIdempotency({ organizationId: ctx.organizationId, key: idemKey, endpoint, payload: body, statusCode: 201, responseBody: res as unknown as Record<string, unknown> });
         return ok(res, 201);
       }
 
