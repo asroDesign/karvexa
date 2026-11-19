@@ -30,13 +30,14 @@ import {
 } from "@/db/schema";
 import { sha256 } from "@/lib/auth";
 import { recordAuditLog } from "@/lib/audit";
-import { addDec, formatDecimal, mulDec, parseDecimal, subDec } from "@/lib/decimal";
+import { addDec, divDec, eqDec, formatDecimal, mulDec, parseDecimal, subDec } from "@/lib/decimal";
 import { ApiError } from "@/lib/errors";
 import { withTenantTransaction } from "@/lib/tenant";
 import { createJournalEntryTx } from "@/modules/accounting/service";
 import {
   finalizePurchaseInvoice,
   finalizeSalesInvoice,
+  type PaymentAllocationInput,
 } from "@/modules/commerce/service";
 import { approveStockCount, postStockDocumentTx } from "@/modules/inventory/service";
 import {
@@ -51,6 +52,176 @@ const UUID_REGEX =
 
 function isUuid(v: unknown): v is string {
   return typeof v === "string" && UUID_REGEX.test(v);
+}
+
+function prepareOfflineInvoice(payload: Record<string, unknown>) {
+  const rawItems = Array.isArray(payload.items)
+    ? (payload.items as Array<Record<string, unknown>>)
+    : [];
+  if (rawItems.length === 0) {
+    throw new ApiError(422, "VALIDATION_ERROR", "فاکتور آفلاین باید حداقل یک ردیف کالا داشته باشد.");
+  }
+
+  const normalized = rawItems.map((item) => {
+    const productId = String(item.product_id || "");
+    const quantity = String(item.quantity || "0");
+    const unitPrice = String(item.unit_price || "0");
+    if (!isUuid(productId) || parseDecimal(quantity) <= BigInt(0) || parseDecimal(unitPrice) < BigInt(0)) {
+      throw new ApiError(422, "VALIDATION_ERROR", "شناسه کالا، تعداد یا قیمت ردیف فاکتور معتبر نیست.");
+    }
+    const gross = mulDec(quantity, unitPrice);
+    const discountAmount = String(item.discount_amount || "0.00");
+    if (parseDecimal(discountAmount) < BigInt(0) || parseDecimal(discountAmount) > gross) {
+      throw new ApiError(422, "LINE_DISCOUNT_INVALID", "تخفیف ردیف فاکتور معتبر نیست.");
+    }
+    return {
+      clientItemId: isUuid(item.client_item_id) ? String(item.client_item_id) : null,
+      productId,
+      variantId: isUuid(item.variant_id) ? String(item.variant_id) : null,
+      quantity,
+      unitPrice,
+      gross,
+      discountAmount,
+      taxRate: String(item.tax_rate || "0.00"),
+      requestedTax: String(item.tax_amount || "0.00"),
+      description: item.description == null ? null : String(item.description),
+    };
+  });
+
+  const grossSubtotal = normalized.reduce((sum, item) => addDec(sum, item.gross), BigInt(0));
+  if (grossSubtotal <= BigInt(0)) {
+    throw new ApiError(422, "INVOICE_TOTAL_INVALID", "جمع ردیف‌های فاکتور باید بزرگ‌تر از صفر باشد.");
+  }
+
+  const subtotal = String(payload.subtotal || formatDecimal(grossSubtotal, 2));
+  const discountTotal = String(payload.discount_total || payload.discount_amount || "0.00");
+  const taxTotal = String(payload.tax_total || payload.tax_amount || "0.00");
+  const shippingCost = String(payload.shipping_cost || "0.00");
+  const otherCosts = formatDecimal(
+    addDec(String(payload.other_costs || "0.00"), String(payload.rounding_adjustment || "0.00")),
+    2
+  );
+  const grandTotal = String(payload.grand_total || "");
+  const calculatedTotal = formatDecimal(
+    subDec(addDec(addDec(subtotal, taxTotal), addDec(shippingCost, otherCosts)), discountTotal),
+    2
+  );
+  if (!grandTotal || !eqDec(calculatedTotal, grandTotal)) {
+    throw new ApiError(422, "INVOICE_TOTAL_MISMATCH", "جمع فاکتور با ردیف‌ها، تخفیف، مالیات و هزینه‌ها تطبیق ندارد.");
+  }
+
+  let allocatedSubtotal = BigInt(0);
+  const subtotalScaledItems = normalized.map((item, index) => {
+    const allocated = index === normalized.length - 1
+      ? subDec(subtotal, allocatedSubtotal)
+      : mulDec(subtotal, formatDecimal(divDec(item.gross, grossSubtotal), 4));
+    const lineTotal = formatDecimal(allocated, 2);
+    allocatedSubtotal = addDec(allocatedSubtotal, lineTotal);
+    return { ...item, lineTotal };
+  });
+
+  const taxWeightsTotal = normalized.reduce(
+    (sum, item) => addDec(sum, item.requestedTax),
+    BigInt(0)
+  );
+  let allocatedTax = BigInt(0);
+  const items = subtotalScaledItems.map((item, index) => {
+    const weight = taxWeightsTotal > BigInt(0) ? item.requestedTax : formatDecimal(item.gross, 2);
+    const denominator = taxWeightsTotal > BigInt(0) ? taxWeightsTotal : grossSubtotal;
+    const tax = index === subtotalScaledItems.length - 1
+      ? subDec(taxTotal, allocatedTax)
+      : mulDec(taxTotal, formatDecimal(divDec(weight, denominator), 4));
+    const taxAmount = formatDecimal(tax, 2);
+    allocatedTax = addDec(allocatedTax, taxAmount);
+    return {
+      clientItemId: item.clientItemId,
+      productId: item.productId,
+      variantId: item.variantId,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discountAmount: item.discountAmount,
+      taxRate: item.taxRate,
+      taxAmount,
+      lineTotal: item.lineTotal,
+      description: item.description,
+    };
+  });
+
+  return { items, subtotal, discountTotal, taxTotal, shippingCost, otherCosts, grandTotal };
+}
+
+function parseSyncPaymentAllocations(payload: Record<string, unknown>): PaymentAllocationInput[] {
+  if (!Array.isArray(payload.payment_allocations)) return [];
+  const supported = new Set<PaymentAllocationInput["paymentMethod"]>([
+    "CASH", "BANK", "BANK_TRANSFER", "CARD_TERMINAL", "POS", "WALLET", "CHEQUE", "CREDIT", "ACCOUNT_BALANCE", "OTHER",
+  ]);
+  return (payload.payment_allocations as Array<Record<string, unknown>>).map((item) => {
+    const paymentMethod = String(item.payment_method || "").toUpperCase() as PaymentAllocationInput["paymentMethod"];
+    const amount = String(item.amount || "0.00");
+    if (!supported.has(paymentMethod) || parseDecimal(amount) < BigInt(0)) {
+      throw new ApiError(422, "PAYMENT_ALLOCATION_INVALID", "روش یا مبلغ یکی از تسویه‌های فاکتور معتبر نیست.");
+    }
+    const rawCheque = item.cheque && typeof item.cheque === "object"
+      ? (item.cheque as Record<string, unknown>)
+      : null;
+    const cheque = rawCheque ? {
+      chequeNumber: String(rawCheque.chequeNumber || item.reference_number || ""),
+      serialNumber: rawCheque.serialNumber == null ? undefined : String(rawCheque.serialNumber),
+      bankName: String(rawCheque.bankName || "بانک طرف‌حساب"),
+      branchName: rawCheque.branchName == null ? undefined : String(rawCheque.branchName),
+      drawerName: rawCheque.drawerName == null ? undefined : String(rawCheque.drawerName),
+      issueDate: rawCheque.issueDate == null ? undefined : String(rawCheque.issueDate),
+      dueDate: rawCheque.dueDate == null ? undefined : String(rawCheque.dueDate),
+      notes: rawCheque.notes == null ? undefined : String(rawCheque.notes),
+    } : null;
+    return {
+      financialAccountId: isUuid(item.financial_account_id) ? String(item.financial_account_id) : null,
+      paymentMethod,
+      amount,
+      referenceNumber: item.reference_number == null ? null : String(item.reference_number),
+      cheque,
+    };
+  });
+}
+
+async function ensureWalkInCustomer(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  organizationId: string,
+  deviceId: string,
+) {
+  const [existing] = await tx.select().from(contacts).where(and(
+    eq(contacts.organizationId, organizationId),
+    eq(contacts.code, "WALK-IN"),
+  )).limit(1);
+  if (existing) return existing.id;
+
+  const [created] = await tx.insert(contacts).values({
+    organizationId,
+    code: "WALK-IN",
+    name: "فروش نقدی / مشتری متفرقه",
+    contactType: "CUSTOMER",
+    notes: "طرف‌حساب سیستمی برای فاکتورهای فروش نقدی بدون انتخاب مشتری در اندروید.",
+    version: 1,
+    syncSeq: Date.now(),
+  }).returning();
+  await appendSyncChangeLog(tx, {
+    organizationId,
+    entityType: "contact",
+    entityId: created.id,
+    operation: "UPSERT",
+    version: created.version,
+    sourceDeviceId: deviceId,
+    payload: {
+      id: created.id,
+      code: created.code,
+      display_name: created.name,
+      type: created.contactType,
+      mobile: null,
+      credit_limit: created.creditLimit,
+      is_active: true,
+    },
+  });
+  return created.id;
 }
 
 export interface SyncPushEventInput {
@@ -1004,17 +1175,13 @@ async function processSingleSyncEvent(params: {
       return withTenantTransaction(organizationId, async (tx) => {
         const supplierId = String(p.supplier_id || p.contact_id || "");
         const warehouseId = String(p.warehouse_id || "");
-        const items = (p.items as Array<{ product_id: string; quantity: string; unit_price: string }>) ?? [];
-        if (!isUuid(supplierId) || !isUuid(warehouseId) || items.length === 0) {
+        if (p.document_type && String(p.document_type).toUpperCase() !== "PURCHASE_INVOICE") {
+          throw new ApiError(422, "UNSUPPORTED_DOCUMENT_TYPE", "همگام‌سازی خرید فقط فاکتور خرید را می‌پذیرد.");
+        }
+        const prepared = prepareOfflineInvoice(p);
+        if (!isUuid(supplierId) || !isUuid(warehouseId) || prepared.items.length === 0) {
           throw new ApiError(422, "VALIDATION_ERROR", "اطلاعات خرید آفلاین (supplier_id, warehouse_id, items) ناقص است.");
         }
-
-        let subtotal = BigInt(0);
-        const computed = items.map((it) => {
-          const lt = mulDec(it.quantity, it.unit_price);
-          subtotal = addDec(subtotal, lt);
-          return { ...it, line_total: formatDecimal(lt, 2) };
-        });
 
         const docNum = String(p.document_number || `PI-OFF-${Date.now().toString().slice(-6)}`);
         const [inv] = await tx
@@ -1027,9 +1194,19 @@ async function processSingleSyncEvent(params: {
             warehouseId,
             invoiceNumber: docNum,
             invoiceDate: String(p.document_date || new Date().toISOString().slice(0, 10)),
-            subtotal: formatDecimal(subtotal, 2),
-            totalAmount: formatDecimal(subtotal, 2),
-            remainingAmount: formatDecimal(subtotal, 2),
+            currency: String(p.currency || "IRR"),
+            exchangeRate: String(p.exchange_rate || "1.0000"),
+            subtotal: prepared.subtotal,
+            discountAmount: prepared.discountTotal,
+            taxAmount: prepared.taxTotal,
+            shippingCost: prepared.shippingCost,
+            otherCosts: prepared.otherCosts,
+            totalAmount: prepared.grandTotal,
+            paidAmount: "0.00",
+            remainingAmount: prepared.grandTotal,
+            relatedDocumentId: isUuid(p.related_document_id) ? String(p.related_document_id) : null,
+            relatedDocumentType: p.related_document_type ? String(p.related_document_type) : null,
+            receiptUrl: p.receipt_url ? String(p.receipt_url) : null,
             // Android CANNOT directly confirm — server creates as DRAFT!
             status: "DRAFT",
             notes: p.notes ? String(p.notes) : "ثبت‌شده در حالت آفلاین اندروید",
@@ -1040,13 +1217,18 @@ async function processSingleSyncEvent(params: {
           .returning();
 
         await tx.insert(purchaseInvoiceItems).values(
-          computed.map((it) => ({
+          prepared.items.map((it) => ({
+            ...(isUuid(it.clientItemId) ? { id: it.clientItemId } : {}),
             organizationId,
             purchaseInvoiceId: inv.id,
-            productId: it.product_id,
+            productId: it.productId,
+            variantId: it.variantId,
             quantity: it.quantity,
-            unitPrice: it.unit_price,
-            lineTotal: it.line_total,
+            unitPrice: it.unitPrice,
+            discountAmount: it.discountAmount,
+            taxRate: it.taxRate,
+            taxAmount: it.taxAmount,
+            lineTotal: it.lineTotal,
           }))
         );
 
@@ -1078,6 +1260,67 @@ async function processSingleSyncEvent(params: {
       });
     }
 
+    if (operation === "UPDATE") {
+      return withTenantTransaction(organizationId, async (tx) => {
+        const [existing] = await tx.select().from(purchaseInvoices).where(and(
+          eq(purchaseInvoices.id, clientUuid),
+          eq(purchaseInvoices.organizationId, organizationId)
+        )).limit(1);
+        if (!existing) throw new ApiError(404, "INVOICE_NOT_FOUND", "پیش‌نویس خرید برای بروزرسانی یافت نشد.");
+        if (existing.status !== "DRAFT") throw new ApiError(409, "INVOICE_ALREADY_FINALIZED", "فقط پیش‌نویس خرید قابل ویرایش است.");
+        const supplierId = String(p.supplier_id || p.contact_id || "");
+        const warehouseId = String(p.warehouse_id || "");
+        if (!isUuid(supplierId) || !isUuid(warehouseId)) throw new ApiError(422, "VALIDATION_ERROR", "تأمین‌کننده یا انبار فاکتور خرید معتبر نیست.");
+        const prepared = prepareOfflineInvoice(p);
+        const [updated] = await tx.update(purchaseInvoices).set({
+          contactId: supplierId,
+          warehouseId,
+          invoiceNumber: String(p.document_number || existing.invoiceNumber),
+          invoiceDate: String(p.document_date || existing.invoiceDate),
+          currency: String(p.currency || existing.currency),
+          exchangeRate: String(p.exchange_rate || existing.exchangeRate),
+          subtotal: prepared.subtotal,
+          discountAmount: prepared.discountTotal,
+          taxAmount: prepared.taxTotal,
+          shippingCost: prepared.shippingCost,
+          otherCosts: prepared.otherCosts,
+          totalAmount: prepared.grandTotal,
+          paidAmount: "0.00",
+          remainingAmount: prepared.grandTotal,
+          relatedDocumentId: isUuid(p.related_document_id) ? String(p.related_document_id) : null,
+          relatedDocumentType: p.related_document_type ? String(p.related_document_type) : null,
+          notes: p.notes ? String(p.notes) : null,
+          version: existing.version + 1,
+          syncSeq: Date.now(),
+          updatedAt: new Date(),
+        }).where(eq(purchaseInvoices.id, existing.id)).returning();
+        await tx.delete(purchaseInvoiceItems).where(eq(purchaseInvoiceItems.purchaseInvoiceId, existing.id));
+        await tx.insert(purchaseInvoiceItems).values(prepared.items.map((item) => ({
+          ...(isUuid(item.clientItemId) ? { id: item.clientItemId } : {}),
+          organizationId,
+          purchaseInvoiceId: updated.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discountAmount: item.discountAmount,
+          taxRate: item.taxRate,
+          taxAmount: item.taxAmount,
+          lineTotal: item.lineTotal,
+        })));
+        await appendSyncChangeLog(tx, {
+          organizationId,
+          entityType: "purchase",
+          entityId: updated.id,
+          operation: "UPSERT",
+          version: updated.version,
+          sourceDeviceId: deviceId,
+          payload: { id: updated.id, document_number: updated.invoiceNumber, grand_total: updated.totalAmount, status: "DRAFT" },
+        });
+        return { event_id: ev.event_id, entity_id: updated.id, server_id: updated.id, status: "ACCEPTED", entity_version: updated.version, business_status: "DRAFT", error: null };
+      });
+    }
+
     if (operation === "CONFIRM") {
       const finalized = await finalizePurchaseInvoice({
         organizationId,
@@ -1085,6 +1328,7 @@ async function processSingleSyncEvent(params: {
         actorUserId: params.userId,
         actorEmail: params.userEmail,
         ipAddress: params.ipAddress,
+        paymentAllocations: parseSyncPaymentAllocations(p),
       });
 
       await appendSyncChangeLog(db, {
@@ -1122,19 +1366,16 @@ async function processSingleSyncEvent(params: {
   if (entityType === "sales") {
     if (operation === "CREATE") {
       return withTenantTransaction(organizationId, async (tx) => {
-        const customerId = String(p.customer_id || p.contact_id || "");
+        let customerId = String(p.customer_id || p.contact_id || "");
+        if (customerId === "walk-in") customerId = await ensureWalkInCustomer(tx, organizationId, deviceId);
         const warehouseId = String(p.warehouse_id || "");
-        const items = (p.items as Array<{ product_id: string; quantity: string; unit_price: string }>) ?? [];
-        if (!isUuid(customerId) || !isUuid(warehouseId) || items.length === 0) {
+        if (p.document_type && String(p.document_type).toUpperCase() !== "SALES_INVOICE") {
+          throw new ApiError(422, "UNSUPPORTED_DOCUMENT_TYPE", "همگام‌سازی فروش فقط فاکتور فروش را می‌پذیرد.");
+        }
+        const prepared = prepareOfflineInvoice(p);
+        if (!isUuid(customerId) || !isUuid(warehouseId) || prepared.items.length === 0) {
           throw new ApiError(422, "VALIDATION_ERROR", "اطلاعات فروش آفلاین (customer_id, warehouse_id, items) ناقص است.");
         }
-
-        let subtotal = BigInt(0);
-        const computed = items.map((it) => {
-          const lt = mulDec(it.quantity, it.unit_price);
-          subtotal = addDec(subtotal, lt);
-          return { ...it, line_total: formatDecimal(lt, 2) };
-        });
 
         const docNum = String(p.document_number || `SI-OFF-${Date.now().toString().slice(-6)}`);
         const [inv] = await tx
@@ -1147,9 +1388,19 @@ async function processSingleSyncEvent(params: {
             warehouseId,
             invoiceNumber: docNum,
             invoiceDate: String(p.document_date || new Date().toISOString().slice(0, 10)),
-            subtotal: formatDecimal(subtotal, 2),
-            totalAmount: formatDecimal(subtotal, 2),
-            remainingAmount: formatDecimal(subtotal, 2),
+            currency: String(p.currency || "IRR"),
+            exchangeRate: String(p.exchange_rate || "1.0000"),
+            subtotal: prepared.subtotal,
+            discountAmount: prepared.discountTotal,
+            taxAmount: prepared.taxTotal,
+            shippingCost: prepared.shippingCost,
+            otherCosts: prepared.otherCosts,
+            totalAmount: prepared.grandTotal,
+            paidAmount: "0.00",
+            remainingAmount: prepared.grandTotal,
+            relatedDocumentId: isUuid(p.related_document_id) ? String(p.related_document_id) : null,
+            relatedDocumentType: p.related_document_type ? String(p.related_document_type) : null,
+            receiptUrl: p.receipt_url ? String(p.receipt_url) : null,
             status: "DRAFT", // Never CONFIRMED directly from Android!
             notes: p.notes ? String(p.notes) : "ثبت‌شده در حالت آفلاین اندروید",
             createdBy: params.userId,
@@ -1159,13 +1410,19 @@ async function processSingleSyncEvent(params: {
           .returning();
 
         await tx.insert(salesInvoiceItems).values(
-          computed.map((it) => ({
+          prepared.items.map((it) => ({
+            ...(isUuid(it.clientItemId) ? { id: it.clientItemId } : {}),
             organizationId,
             salesInvoiceId: inv.id,
-            productId: it.product_id,
+            productId: it.productId,
+            variantId: it.variantId,
             quantity: it.quantity,
-            unitPrice: it.unit_price,
-            lineTotal: it.line_total,
+            unitPrice: it.unitPrice,
+            discountAmount: it.discountAmount,
+            taxRate: it.taxRate,
+            taxAmount: it.taxAmount,
+            lineTotal: it.lineTotal,
+            description: it.description,
           }))
         );
 
@@ -1197,6 +1454,69 @@ async function processSingleSyncEvent(params: {
       });
     }
 
+    if (operation === "UPDATE") {
+      return withTenantTransaction(organizationId, async (tx) => {
+        const [existing] = await tx.select().from(salesInvoices).where(and(
+          eq(salesInvoices.id, clientUuid),
+          eq(salesInvoices.organizationId, organizationId)
+        )).limit(1);
+        if (!existing) throw new ApiError(404, "INVOICE_NOT_FOUND", "پیش‌نویس فروش برای بروزرسانی یافت نشد.");
+        if (existing.status !== "DRAFT") throw new ApiError(409, "INVOICE_ALREADY_FINALIZED", "فقط پیش‌نویس فروش قابل ویرایش است.");
+        let customerId = String(p.customer_id || p.contact_id || "");
+        if (customerId === "walk-in") customerId = await ensureWalkInCustomer(tx, organizationId, deviceId);
+        const warehouseId = String(p.warehouse_id || "");
+        if (!isUuid(customerId) || !isUuid(warehouseId)) throw new ApiError(422, "VALIDATION_ERROR", "مشتری یا انبار فاکتور فروش معتبر نیست.");
+        const prepared = prepareOfflineInvoice(p);
+        const [updated] = await tx.update(salesInvoices).set({
+          contactId: customerId,
+          warehouseId,
+          invoiceNumber: String(p.document_number || existing.invoiceNumber),
+          invoiceDate: String(p.document_date || existing.invoiceDate),
+          currency: String(p.currency || existing.currency),
+          exchangeRate: String(p.exchange_rate || existing.exchangeRate),
+          subtotal: prepared.subtotal,
+          discountAmount: prepared.discountTotal,
+          taxAmount: prepared.taxTotal,
+          shippingCost: prepared.shippingCost,
+          otherCosts: prepared.otherCosts,
+          totalAmount: prepared.grandTotal,
+          paidAmount: "0.00",
+          remainingAmount: prepared.grandTotal,
+          relatedDocumentId: isUuid(p.related_document_id) ? String(p.related_document_id) : null,
+          relatedDocumentType: p.related_document_type ? String(p.related_document_type) : null,
+          notes: p.notes ? String(p.notes) : null,
+          version: existing.version + 1,
+          syncSeq: Date.now(),
+          updatedAt: new Date(),
+        }).where(eq(salesInvoices.id, existing.id)).returning();
+        await tx.delete(salesInvoiceItems).where(eq(salesInvoiceItems.salesInvoiceId, existing.id));
+        await tx.insert(salesInvoiceItems).values(prepared.items.map((item) => ({
+          ...(isUuid(item.clientItemId) ? { id: item.clientItemId } : {}),
+          organizationId,
+          salesInvoiceId: updated.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discountAmount: item.discountAmount,
+          taxRate: item.taxRate,
+          taxAmount: item.taxAmount,
+          lineTotal: item.lineTotal,
+          description: item.description,
+        })));
+        await appendSyncChangeLog(tx, {
+          organizationId,
+          entityType: "sales",
+          entityId: updated.id,
+          operation: "UPSERT",
+          version: updated.version,
+          sourceDeviceId: deviceId,
+          payload: { id: updated.id, document_number: updated.invoiceNumber, grand_total: updated.totalAmount, status: "DRAFT" },
+        });
+        return { event_id: ev.event_id, entity_id: updated.id, server_id: updated.id, status: "ACCEPTED", entity_version: updated.version, business_status: "DRAFT", error: null };
+      });
+    }
+
     if (operation === "CONFIRM") {
       // Uses PostgreSQL advisory lock in Stock Ledger — prevents multi-device negative stock!
       const finalized = await finalizeSalesInvoice({
@@ -1205,6 +1525,7 @@ async function processSingleSyncEvent(params: {
         actorUserId: params.userId,
         actorEmail: params.userEmail,
         ipAddress: params.ipAddress,
+        paymentAllocations: parseSyncPaymentAllocations(p),
       });
 
       await appendSyncChangeLog(db, {

@@ -21,6 +21,7 @@ graphify-out/.graphify_chunks.json
 .codex/hooks.json
 # Graphify local history, generated visualizations, and query memory
 graphify-out/.graphify_build_state.json
+graphify-out/.graphify_build.json
 graphify-out/.graphify_labels*
 graphify-out/.graphify_learning.json
 graphify-out/2026-*/

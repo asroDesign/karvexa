@@ -937,6 +937,7 @@ export async function finalizePurchaseInvoice(params: {
   actorUserId: string;
   actorEmail: string;
   ipAddress?: string | null;
+  paymentAllocations?: PaymentAllocationInput[];
 }) {
   await ensurePrompt05OrgDefaults(params.organizationId);
   const result = await withTenantTransaction(params.organizationId, async (tx) => {
@@ -997,6 +998,16 @@ export async function finalizePurchaseInvoice(params: {
       throw new ApiError(422, "FOREIGN_CURRENCY_POSTING_UNSUPPORTED", `ثبت قطعی خرید با ارز ${inv.currency} در دفتر ${organization.baseCurrency} تا پیاده‌سازی کامل تسعیر مجاز نیست.`);
     }
 
+    const allocations = (params.paymentAllocations ?? []).filter((a) => isPositiveDec(parseDecimal(a.amount)));
+    const totalAllocated = allocations.reduce((sum, allocation) => addDec(sum, allocation.amount), BigInt(0));
+    if (gtDec(totalAllocated, parseDecimal(inv.totalAmount))) {
+      throw new ApiError(422, "OVERPAYMENT_NOT_ALLOWED", "جمع تسویه‌های خرید نمی‌تواند از مبلغ فاکتور بیشتر باشد.");
+    }
+    const immediateAllocations = allocations.filter((a) => !["CREDIT", "ACCOUNT_BALANCE", "CHEQUE"].includes(a.paymentMethod));
+    const chequeAllocations = allocations.filter((a) => a.paymentMethod === "CHEQUE");
+    const immediateTotal = immediateAllocations.reduce((sum, allocation) => addDec(sum, allocation.amount), BigInt(0));
+    const chequeTotal = chequeAllocations.reduce((sum, allocation) => addDec(sum, allocation.amount), BigInt(0));
+
     let allocatedPurchaseCost = BigInt(0);
     const valuedItems = items.map((item, index) => {
       const lineCost = index === items.length - 1
@@ -1038,9 +1049,6 @@ export async function finalizePurchaseInvoice(params: {
     ));
     let supplierDebitBalance = BigInt(0);
     for (const row of supplierLedger) supplierDebitBalance = addDec(supplierDebitBalance, subDec(row.debit, row.credit));
-    const advanceApplied = supplierDebitBalance > BigInt(0)
-      ? (supplierDebitBalance < parseDecimal(inv.totalAmount) ? supplierDebitBalance : parseDecimal(inv.totalAmount))
-      : BigInt(0);
     const supplierAdvanceAcc = await findSystemAccount(tx, params.organizationId, "SUPPLIER_ADVANCE", true);
     let supplierAdvanceBalance = BigInt(0);
     if (supplierAdvanceAcc) {
@@ -1055,10 +1063,143 @@ export async function finalizePurchaseInvoice(params: {
         ));
       for (const line of advanceLines) supplierAdvanceBalance = addDec(supplierAdvanceBalance, subDec(line.debit, line.credit));
     }
-    const advanceAssetApplied = supplierAdvanceBalance > BigInt(0)
-      ? (supplierAdvanceBalance < advanceApplied ? supplierAdvanceBalance : advanceApplied)
+    const directPaid = addDec(immediateTotal, chequeTotal);
+    const payableBeforeAdvance = subDec(parseDecimal(inv.totalAmount), directPaid);
+    const advanceApplied = supplierDebitBalance > BigInt(0) && supplierAdvanceBalance > BigInt(0)
+      ? [supplierDebitBalance, supplierAdvanceBalance, payableBeforeAdvance].reduce((min, value) => value < min ? value : min)
       : BigInt(0);
-    const remainingPayable = subDec(parseDecimal(inv.totalAmount), advanceApplied);
+    const advanceAssetApplied = advanceApplied;
+    const remainingPayable = subDec(payableBeforeAdvance, advanceApplied);
+
+    const cashAcc = await findSystemAccount(tx, params.organizationId, "CASH", true);
+    const bankAcc = await findSystemAccount(tx, params.organizationId, "BANK", true);
+    let orgFinAccs = await tx
+      .select()
+      .from(financialAccounts)
+      .where(eq(financialAccounts.organizationId, params.organizationId));
+    const resolveTargetFin = (allocation: PaymentAllocationInput) => {
+      if (allocation.financialAccountId) return orgFinAccs.find((account) => account.id === allocation.financialAccountId);
+      if (allocation.paymentMethod === "CASH") return orgFinAccs.find((account) => account.accountType === "CASHBOX" || account.accountType === "CASH");
+      if (allocation.paymentMethod === "POS" || allocation.paymentMethod === "CARD_TERMINAL") {
+        return orgFinAccs.find((account) => account.accountType === "POS" || account.accountType === "CARD_TERMINAL");
+      }
+      return orgFinAccs.find((account) => account.accountType === "BANK");
+    };
+    const targetFinByAllocation = new Map<PaymentAllocationInput, (typeof orgFinAccs)[number]>();
+    for (const allocation of immediateAllocations) {
+      const target = resolveTargetFin(allocation);
+      if (!target) throw new ApiError(422, "TREASURY_ACCOUNT_REQUIRED", `برای روش پرداخت ${allocation.paymentMethod} حساب خزانه فعال تعریف نشده است.`);
+      if (!target.isActive) throw new ApiError(409, "TREASURY_ACCOUNT_INACTIVE", `حساب خزانه «${target.name}» غیرفعال است.`);
+      if (target.currency !== organization.baseCurrency) throw new ApiError(422, "FOREIGN_CURRENCY_TREASURY_UNSUPPORTED", `حساب «${target.name}» ارز ${target.currency} دارد؛ تسویه چندارزی پشتیبانی نمی‌شود.`);
+      targetFinByAllocation.set(allocation, target);
+    }
+    for (const accountId of [...new Set([...targetFinByAllocation.values()].map((account) => account.id))].sort()) {
+      await tx.execute(sql`SELECT id FROM financial_accounts WHERE id = ${accountId} AND organization_id = ${params.organizationId} FOR UPDATE`);
+    }
+    if (targetFinByAllocation.size > 0) {
+      orgFinAccs = await tx.select().from(financialAccounts).where(eq(financialAccounts.organizationId, params.organizationId));
+      for (const allocation of immediateAllocations) {
+        const prior = targetFinByAllocation.get(allocation);
+        const current = orgFinAccs.find((account) => account.id === prior?.id);
+        if (current) targetFinByAllocation.set(allocation, current);
+      }
+    }
+    const immediateTotalsByAccount = new Map<string, bigint>();
+    for (const allocation of immediateAllocations) {
+      const target = targetFinByAllocation.get(allocation)!;
+      immediateTotalsByAccount.set(
+        target.id,
+        addDec(immediateTotalsByAccount.get(target.id) ?? BigInt(0), allocation.amount),
+      );
+    }
+    for (const [accountId, amount] of immediateTotalsByAccount) {
+      const target = orgFinAccs.find((account) => account.id === accountId)!;
+      const [updated] = await tx.update(financialAccounts).set({
+        balance: formatDecimal(subDec(target.balance, formatDecimal(amount, 2)), 2),
+        version: target.version + 1,
+        updatedAt: new Date(),
+      }).where(and(eq(financialAccounts.id, target.id), eq(financialAccounts.version, target.version))).returning({ id: financialAccounts.id });
+      if (!updated) throw new ApiError(409, "TREASURY_ACCOUNT_CHANGED", "حساب خزانه هم‌زمان تغییر کرده است؛ درخواست را دوباره ارسال کنید.");
+    }
+
+    const payableChequeAcc = chequeAllocations.length > 0
+      ? await findSystemAccount(tx, params.organizationId, "PAYABLE_CHEQUE", true)
+      : null;
+    if (chequeAllocations.length > 0 && !payableChequeAcc) {
+      throw new ApiError(422, "PAYABLE_CHEQUE_ACCOUNT_MISSING", "برای تسویه خرید با چک، حساب اسناد پرداختنی باید در کدینگ تعریف شود.");
+    }
+    const issuedCheques: Array<{ id: string; amount: string }> = [];
+    const paymentFinancialTransactionIds: string[] = [];
+    const paymentJournalLines: JournalLineInput[] = [];
+    const paymentLedgerRefs: Array<{ referenceType: string; referenceId: string; amount: string }> = [];
+    for (const allocation of immediateAllocations) {
+      const target = targetFinByAllocation.get(allocation)!;
+      const accountId = target.accountId ?? ((target.accountType === "CASHBOX" || target.accountType === "CASH") ? cashAcc?.id : bankAcc?.id);
+      if (!accountId) throw new ApiError(422, "TREASURY_GL_ACCOUNT_MISSING", `حساب معین برای خزانه «${target.name}» مشخص نشده است.`);
+      const [txRow] = await tx.insert(financialTransactions).values({
+        organizationId: params.organizationId,
+        financialAccountId: target.id,
+        contactId: inv.contactId,
+        txType: "PAYMENT",
+        paymentMethod: allocation.paymentMethod,
+        currency: inv.currency,
+        amount: allocation.amount,
+        txDate: inv.invoiceDate,
+        trackingNumber: allocation.referenceNumber ?? null,
+        relatedDocumentType: "PURCHASE_INVOICE",
+        relatedDocumentId: inv.id,
+        description: `پرداخت بابت فاکتور خرید ${inv.invoiceNumber}`,
+        createdBy: params.actorUserId,
+      }).returning({ id: financialTransactions.id });
+      paymentFinancialTransactionIds.push(txRow.id);
+      paymentJournalLines.push({
+        accountId,
+        debit: "0.00",
+        credit: allocation.amount,
+        description: `پرداخت ${allocation.paymentMethod} بابت فاکتور خرید ${inv.invoiceNumber}`,
+      });
+      paymentLedgerRefs.push({ referenceType: "TREASURY", referenceId: txRow.id, amount: allocation.amount });
+    }
+    for (const allocation of chequeAllocations) {
+      const chequeNumber = allocation.cheque?.chequeNumber || allocation.referenceNumber || `CHQ-${Date.now().toString().slice(-8)}`;
+      const issueDate = allocation.cheque?.issueDate || inv.invoiceDate;
+      const dueDate = allocation.cheque?.dueDate || issueDate;
+      const [cheque] = await tx.insert(cheques).values({
+        organizationId: params.organizationId,
+        contactId: inv.contactId,
+        chequeType: "PAYABLE",
+        sayadId: chequeNumber,
+        serialNumber: allocation.cheque?.serialNumber || chequeNumber.slice(-6),
+        bankName: allocation.cheque?.bankName || "بانک طرف‌حساب",
+        branchName: allocation.cheque?.branchName ?? null,
+        drawerName: null,
+        recipientName: null,
+        amount: allocation.amount,
+        issueDate,
+        dueDate,
+        relatedDocumentType: "PURCHASE_INVOICE",
+        relatedDocumentId: inv.id,
+        status: "ISSUED",
+        notes: allocation.cheque?.notes || `چک پرداختنی بابت فاکتور خرید ${inv.invoiceNumber}`,
+      }).returning({ id: cheques.id });
+      await tx.insert(chequeEvents).values({
+        organizationId: params.organizationId,
+        chequeId: cheque.id,
+        fromStatus: null,
+        toStatus: "ISSUED",
+        eventDate: issueDate,
+        note: `صدور چک بابت فاکتور خرید ${inv.invoiceNumber}`,
+        actorUserId: params.actorUserId,
+      });
+      issuedCheques.push({ id: cheque.id, amount: allocation.amount });
+      paymentJournalLines.push({
+        accountId: payableChequeAcc!.id,
+        debit: "0.00",
+        credit: allocation.amount,
+        description: `چک پرداختنی ${chequeNumber} بابت فاکتور خرید ${inv.invoiceNumber}`,
+      });
+      paymentLedgerRefs.push({ referenceType: "CHEQUE", referenceId: cheque.id, amount: allocation.amount });
+    }
 
     const purchaseJournalLines: JournalLineInput[] = [
       {
@@ -1073,26 +1214,21 @@ export async function finalizePurchaseInvoice(params: {
         credit: "0.00",
         description: `اعتبار مالیات بر ارزش افزوده خرید ${inv.invoiceNumber}`,
       }] : []),
-      {
+      ...(isPositiveDec(remainingPayable) ? [{
         accountId: apAcc.id,
         contactId: inv.contactId,
         debit: "0.00",
-        credit: inv.totalAmount,
-        description: `بستانکاری تأمین‌کننده بابت فاکتور خرید ${inv.invoiceNumber}`,
-      },
+        credit: formatDecimal(remainingPayable, 2),
+        description: `مانده بستانکاری تأمین‌کننده بابت فاکتور خرید ${inv.invoiceNumber}`,
+      }] : []),
       ...(isPositiveDec(advanceAssetApplied) && supplierAdvanceAcc ? [{
-        accountId: apAcc.id,
-        contactId: inv.contactId,
-        debit: formatDecimal(advanceAssetApplied, 2),
-        credit: "0.00",
-        description: `اعمال پیش‌پرداخت تأمین‌کننده روی حساب پرداختنی ${inv.invoiceNumber}`,
-      }, {
         accountId: supplierAdvanceAcc.id,
         contactId: inv.contactId,
         debit: "0.00",
         credit: formatDecimal(advanceAssetApplied, 2),
         description: `اعمال پیش‌پرداخت تأمین‌کننده روی فاکتور خرید ${inv.invoiceNumber}`,
       }] : []),
+      ...paymentJournalLines,
     ];
 
     const journalRes = await createJournalEntryTx(tx, {
@@ -1107,6 +1243,15 @@ export async function finalizePurchaseInvoice(params: {
       lines: purchaseJournalLines,
     });
 
+    for (const financialTransactionId of paymentFinancialTransactionIds) {
+      await tx.update(financialTransactions)
+        .set({ journalEntryId: journalRes.entry.id, version: 2, updatedAt: new Date() })
+        .where(eq(financialTransactions.id, financialTransactionId));
+    }
+    for (const cheque of issuedCheques) {
+      await tx.update(cheques).set({ journalEntryId: journalRes.entry.id }).where(eq(cheques.id, cheque.id));
+    }
+
     await tx.insert(contactTransactions).values({
       organizationId: params.organizationId,
       contactId: inv.contactId,
@@ -1117,12 +1262,36 @@ export async function finalizePurchaseInvoice(params: {
       credit: inv.totalAmount,
       description: `فاکتور خرید ${inv.invoiceNumber}`,
     });
+    if (paymentLedgerRefs.length > 0) {
+      await tx.insert(contactTransactions).values(paymentLedgerRefs.map((payment) => ({
+        organizationId: params.organizationId,
+        contactId: inv.contactId,
+        referenceType: payment.referenceType,
+        referenceId: payment.referenceId,
+        txDate: inv.invoiceDate,
+        debit: payment.amount,
+        credit: "0.00",
+        description: `تسویه فاکتور خرید ${inv.invoiceNumber}`,
+      })));
+    }
+    if (isPositiveDec(advanceApplied)) {
+      await tx.insert(contactTransactions).values({
+        organizationId: params.organizationId,
+        contactId: inv.contactId,
+        referenceType: "SUPPLIER_ADVANCE_APPLIED",
+        referenceId: inv.id,
+        txDate: inv.invoiceDate,
+        debit: formatDecimal(advanceApplied, 2),
+        credit: "0.00",
+        description: `اعمال پیش‌پرداخت روی فاکتور خرید ${inv.invoiceNumber}`,
+      });
+    }
 
     const [finalized] = await tx
       .update(purchaseInvoices)
       .set({
         status: "CONFIRMED",
-        paidAmount: formatDecimal(advanceApplied, 2),
+        paidAmount: formatDecimal(addDec(directPaid, advanceApplied), 2),
         remainingAmount: formatDecimal(remainingPayable, 2),
         stockDocumentId: stockRes.document.id,
         journalEntryId: journalRes.entry.id,
