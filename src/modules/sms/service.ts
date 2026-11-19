@@ -8,8 +8,18 @@ import { ApiError } from "@/lib/errors";
 
 export type SmsProviderCode = "SMS_IR" | "KAVENEGAR";
 
+export function normalizeIranDigits(raw: string): string {
+  return Array.from(raw, (character) => {
+    const code = character.codePointAt(0) ?? 0;
+    if (code >= 0x06f0 && code <= 0x06f9) return String(code - 0x06f0);
+    if (code >= 0x0660 && code <= 0x0669) return String(code - 0x0660);
+    return character;
+  }).join("");
+}
+
 export function normalizeIranMobile(raw: string): string {
-  const digits = raw.replace(/\D/g, "");
+  const digits = normalizeIranDigits(raw).replace(/\D/g, "");
+  if (digits.startsWith("0098") && digits.length === 14) return `0${digits.slice(4)}`;
   if (digits.startsWith("98") && digits.length === 12) return `0${digits.slice(2)}`;
   if (digits.startsWith("9") && digits.length === 10) return `0${digits}`;
   return digits;
@@ -312,7 +322,8 @@ export async function verifyAndConsumeOtpCode(params: {
     throw new ApiError(429, "OTP_MAX_ATTEMPTS", "تعداد تلاش‌های اشتباه بیش از حد مجاز است. کد جدید درخواست دهید.");
   }
 
-  const candidateHash = sha256(`${normalizedMobile}:${params.purpose}:${params.code.trim()}`);
+  const normalizedCode = normalizeIranDigits(params.code).trim();
+  const candidateHash = sha256(`${normalizedMobile}:${params.purpose}:${normalizedCode}`);
   if (candidateHash !== latest.codeHash) {
     await db
       .update(otpCodes)
