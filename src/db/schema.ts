@@ -904,6 +904,7 @@ export const stockCountItems = pgTable(
     productId: uuid("product_id")
       .notNull()
       .references(() => products.id, { onDelete: "restrict" }),
+    variantId: uuid("variant_id"),
     systemQty: numeric("system_qty", { precision: 18, scale: 4 }).notNull(),
     countedQty: numeric("counted_qty", { precision: 18, scale: 4 }).notNull(),
     varianceQty: numeric("variance_qty", { precision: 18, scale: 4 }).notNull(),

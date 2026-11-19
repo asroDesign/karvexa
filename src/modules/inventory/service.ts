@@ -497,7 +497,7 @@ export async function approveStockCount(params: {
   warehouseId: string;
   countDate: string;
   notes?: string;
-  items: Array<{ productId: string; countedQty: string; adjustmentQuantity?: string; adjustmentDirection?: "IN" | "OUT" }>;
+  items: Array<{ productId: string; variantId?: string | null; countedQty: string; adjustmentQuantity?: string; adjustmentDirection?: "IN" | "OUT" }>;
   actorUserId: string;
   actorEmail: string;
   ipAddress?: string | null;
@@ -506,8 +506,9 @@ export async function approveStockCount(params: {
     await assertAccountingDateWritableTx(tx, params.organizationId, params.countDate);
     const countNumber = `SC-${Date.now().toString().slice(-6)}`;
     const productIds = [...new Set(params.items.map((item) => item.productId))];
-    if (productIds.length !== params.items.length) {
-      throw new ApiError(422, "DUPLICATE_COUNT_PRODUCT", "هر کالا باید فقط یک‌بار در یک سند انبارگردانی ثبت شود.");
+    const itemKeys = params.items.map((item) => `${item.productId}:${item.variantId ?? "BASE"}`);
+    if (new Set(itemKeys).size !== itemKeys.length) {
+      throw new ApiError(422, "DUPLICATE_COUNT_ITEM", "هر کالای پایه یا تنوع باید فقط یک‌بار در یک سند انبارگردانی ثبت شود.");
     }
     const [warehouse] = await tx
       .select({ id: warehouses.id })
@@ -528,9 +529,26 @@ export async function approveStockCount(params: {
     if (scopedProducts.length !== productIds.length) {
       throw new ApiError(403, "PRODUCT_NOT_FOUND", "یکی از کالاهای انبارگردانی متعلق به این سازمان نیست.");
     }
+    const variantIds = [...new Set(params.items.map((item) => item.variantId).filter((id): id is string => Boolean(id)))];
+    const scopedVariants = variantIds.length
+      ? await tx
+          .select({ id: productVariants.id, productId: productVariants.productId, purchasePrice: productVariants.purchasePrice })
+          .from(productVariants)
+          .where(and(eq(productVariants.organizationId, params.organizationId), inArray(productVariants.id, variantIds)))
+      : [];
+    if (scopedVariants.length !== variantIds.length) {
+      throw new ApiError(422, "PRODUCT_VARIANT_MISMATCH", "یکی از تنوع‌های انتخاب‌شده متعلق به این سازمان نیست.");
+    }
+    const variantMap = new Map(scopedVariants.map((variant) => [variant.id, variant]));
+    for (const item of params.items) {
+      if (item.variantId && variantMap.get(item.variantId)?.productId !== item.productId) {
+        throw new ApiError(422, "PRODUCT_VARIANT_MISMATCH", "تنوع انتخاب‌شده به همان کالا تعلق ندارد.");
+      }
+    }
 
     const evaluatedItems: Array<{
       productId: string;
+      variantId: string | null;
       systemQty: bigint;
       countedQty: bigint;
       varianceQty: bigint;
@@ -543,13 +561,14 @@ export async function approveStockCount(params: {
         params.organizationId,
         params.warehouseId,
         item.productId,
-        null,
+        item.variantId ?? null,
         scopedProducts.find((product) => product.id === item.productId)?.costingMethod ?? "WEIGHTED_AVERAGE"
       );
       if (current.latestMovementDate && params.countDate < current.latestMovementDate) {
         throw new ApiError(409, "BACKDATED_STOCK_COUNT_NOT_SUPPORTED", "تاریخ انبارگردانی از آخرین گردش ثبت‌شده کالا قدیمی‌تر است؛ موجودی را در تاریخ جاری انبارگردانی کنید.");
       }
       const product = scopedProducts.find((entry) => entry.id === item.productId)!;
+      const variant = item.variantId ? variantMap.get(item.variantId) : undefined;
       const counted = item.adjustmentQuantity !== undefined
         ? item.adjustmentDirection === "OUT"
           ? subDec(current.qty, parseDecimal(item.adjustmentQuantity))
@@ -561,6 +580,7 @@ export async function approveStockCount(params: {
       const variance = subDec(counted, current.qty);
       evaluatedItems.push({
         productId: item.productId,
+        variantId: item.variantId ?? null,
         systemQty: current.qty,
         countedQty: counted,
         varianceQty: variance,
@@ -568,7 +588,7 @@ export async function approveStockCount(params: {
           ? divDec(current.fifoLayers[current.fifoLayers.length - 1].value, current.fifoLayers[current.fifoLayers.length - 1].qty)
           : isPositiveDec(current.avgUnitCost)
             ? current.avgUnitCost
-            : parseDecimal(product.defaultPurchasePrice),
+            : parseDecimal(variant?.purchasePrice ?? product.defaultPurchasePrice),
       });
     }
 
@@ -576,6 +596,7 @@ export async function approveStockCount(params: {
       .filter((i) => i.varianceQty !== BigInt(0))
       .map((i) => ({
         productId: i.productId,
+        variantId: i.variantId,
         direction: (isPositiveDec(i.varianceQty) ? "IN" : "OUT") as "IN" | "OUT",
         quantity: formatDecimal(
           isPositiveDec(i.varianceQty) ? i.varianceQty : -i.varianceQty,
@@ -680,6 +701,7 @@ export async function approveStockCount(params: {
           organizationId: params.organizationId,
           stockCountId: countDoc.id,
           productId: i.productId,
+          variantId: i.variantId,
           systemQty: formatDecimal(i.systemQty, 4),
           countedQty: formatDecimal(i.countedQty, 4),
           varianceQty: formatDecimal(i.varianceQty, 4),

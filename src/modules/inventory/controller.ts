@@ -95,6 +95,7 @@ const countSchema = z.object({
     .array(
       z.object({
         product_id: z.string().uuid(),
+        variant_id: z.string().uuid().nullable().optional(),
         counted_qty: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
         quantity: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
         adjustment_quantity: z.string().regex(/^\d+(\.\d{1,4})?$/).optional(),
@@ -843,7 +844,7 @@ export async function handleWarehouseAndInventoryRoutes(
       if (method === "GET" && !seg2) {
         const ctx = await requireOrgContext(req, "inventory.view");
         const q = parseListQuery(req);
-        const [counts, items, whs, prods] = await Promise.all([
+        const [counts, items, whs, prods, variants] = await Promise.all([
           db
             .select()
             .from(stockCounts)
@@ -852,15 +853,22 @@ export async function handleWarehouseAndInventoryRoutes(
           db.select().from(stockCountItems).where(eq(stockCountItems.organizationId, ctx.organizationId)),
           db.select().from(warehouses).where(eq(warehouses.organizationId, ctx.organizationId)),
           db.select().from(products).where(eq(products.organizationId, ctx.organizationId)),
+          db.select().from(productVariants).where(eq(productVariants.organizationId, ctx.organizationId)),
         ]);
         const whMap = new Map(whs.map((w) => [w.id, w.name]));
         const pMap = new Map(prods.map((p) => [p.id, p.name]));
+        const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
         const enriched = counts.map((c) => ({
           ...c,
           warehouse_name: whMap.get(c.warehouseId) ?? "",
           items: items
             .filter((i) => i.stockCountId === c.id)
-            .map((i) => ({ ...i, product_name: pMap.get(i.productId) ?? "" })),
+            .map((i) => ({
+              ...i,
+              product_name: pMap.get(i.productId) ?? "",
+              variant_name: i.variantId ? variantMap.get(i.variantId)?.variantName ?? "" : "",
+              variant_sku: i.variantId ? variantMap.get(i.variantId)?.sku ?? "" : "",
+            })),
         }));
         const { items: pageItems, total } = applyListFilterAndPaginate(enriched, q, ["countNumber", "warehouse_name"]);
         return okList(pageItems, { page: q.page, perPage: q.perPage, total });
@@ -880,6 +888,7 @@ export async function handleWarehouseAndInventoryRoutes(
           notes: body.notes,
           items: body.items.map((i) => ({
             productId: i.product_id,
+            variantId: i.variant_id ?? null,
             countedQty: i.counted_qty ?? i.quantity ?? "0.0000",
             ...(i.adjustment_quantity !== undefined ? { adjustmentQuantity: i.adjustment_quantity, adjustmentDirection: i.adjustment_direction! } : {}),
           })),
@@ -900,8 +909,22 @@ export async function handleWarehouseAndInventoryRoutes(
           .limit(1);
         if (!cnt) throw new ApiError(404, "STOCK_COUNT_NOT_FOUND", "سند انبارگردانی یافت نشد.");
         if (method === "GET" && !seg3) {
-          const items = await db.select().from(stockCountItems).where(eq(stockCountItems.stockCountId, cnt.id));
-          return ok({ ...cnt, items });
+          const [items, prods, variants] = await Promise.all([
+            db.select().from(stockCountItems).where(and(eq(stockCountItems.stockCountId, cnt.id), eq(stockCountItems.organizationId, ctx.organizationId))),
+            db.select({ id: products.id, name: products.name }).from(products).where(eq(products.organizationId, ctx.organizationId)),
+            db.select({ id: productVariants.id, variantName: productVariants.variantName, sku: productVariants.sku }).from(productVariants).where(eq(productVariants.organizationId, ctx.organizationId)),
+          ]);
+          const pMap = new Map(prods.map((product) => [product.id, product.name]));
+          const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
+          return ok({
+            ...cnt,
+            items: items.map((item) => ({
+              ...item,
+              product_name: pMap.get(item.productId) ?? "",
+              variant_name: item.variantId ? variantMap.get(item.variantId)?.variantName ?? "" : "",
+              variant_sku: item.variantId ? variantMap.get(item.variantId)?.sku ?? "" : "",
+            })),
+          });
         }
         if (method === "POST" && (seg3 === "submit" || seg3 === "confirm")) {
           const [upd] = await db

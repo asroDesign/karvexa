@@ -40,6 +40,7 @@ import { UserAccessSettings } from "./UserAccessSettings";
 import { FiscalLifecyclePanel } from "./FiscalLifecyclePanel";
 import { BusinessSupportTickets } from "./BusinessSupportTickets";
 import { AccountingParityPanel, CommerceParityPanel, InventoryParityPanel, TreasuryParityPanel } from "./BusinessParityPanels";
+import { SupplierAccountsPanel } from "./SupplierAccountsPanel";
 import { Award, BarChart3, CalendarRange, Settings, Sparkles, Wallet, Zap } from "lucide-react";
 
 type OrgTab =
@@ -50,6 +51,7 @@ type OrgTab =
   | "fiscal_lifecycle"
   | "accounting"
   | "inventory"
+  | "supplier_accounts"
   | "variants_replenish"
   | "catalog"
   | "contacts"
@@ -85,6 +87,7 @@ const ORG_TABS: Array<{ id: OrgTab; label: string; icon: React.ComponentType<{ c
   { id: "fiscal_lifecycle", label: "کدینگ، افتتاحیه و سال مالی", icon: CalendarRange },
   { id: "accounting", label: "دفتر روزنامه، تراز و اکسل", icon: BookOpen },
   { id: "inventory", label: "انبار، انتقال و انبارگردانی", icon: Boxes },
+  { id: "supplier_accounts", label: "حساب تأمین‌کنندگان", icon: Users },
   { id: "variants_replenish", label: "تنوع کالا و خرید هوشمند", icon: Sparkles },
   { id: "catalog", label: "کاتالوگ کالا و بارکد", icon: Package },
   { id: "contacts", label: "اشخاص و طرف‌حساب‌ها", icon: Users },
@@ -1326,6 +1329,8 @@ export function OrgWorkspace({ session, onRefreshSession, onToast }: OrgWorkspac
             <InventoryParityPanel orgId={orgId} onToast={onToast} />
           </div>
         )}
+
+        {tab === "supplier_accounts" && <SupplierAccountsPanel orgId={orgId} onToast={onToast} />}
 
         {/* 4. CATALOG */}
         {tab === "catalog" && (

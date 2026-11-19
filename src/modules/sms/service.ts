@@ -31,6 +31,18 @@ export function maskSecretKey(key: string): string {
   return `${key.slice(0, 4)}••••••••${key.slice(-4)}`;
 }
 
+export function normalizeSmsIrLineNumber(raw: string): string {
+  const digits = normalizeIranDigits(raw).replace(/[\s,٬]/g, "");
+  if (!/^\d+$/.test(digits)) {
+    throw new ApiError(422, "SMS_IR_LINE_NUMBER_INVALID", "شناسهٔ خط SMS.ir باید فقط عدد باشد؛ از «دریافت خطوط مجاز» خط حساب را انتخاب کنید.");
+  }
+  const lineNumber = BigInt(digits);
+  if (lineNumber <= BigInt(0) || lineNumber > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new ApiError(422, "SMS_IR_LINE_NUMBER_INVALID", "شناسهٔ خط SMS.ir معتبر نیست؛ خط مجاز حساب را از تنظیمات دریافت و انتخاب کنید.");
+  }
+  return lineNumber.toString();
+}
+
 async function resolveProviderConfig(preferred?: SmsProviderCode) {
   await ensureSaasSeeded();
   const rows = await db.select().from(smsSettings);
@@ -43,6 +55,53 @@ async function resolveProviderConfig(preferred?: SmsProviderCode) {
   const anyActive = rows.find((r) => r.isActive);
   if (anyActive) return anyActive;
   return rows[0] ?? null;
+}
+
+/**
+ * Reads the SMS.ir account's sender lines using the official GET /v1/line endpoint.
+ * This is a read-only diagnostic and never sends a message.
+ */
+export async function getSmsIrLineNumbers() {
+  const config = await resolveProviderConfig("SMS_IR");
+  if (!config) throw new ApiError(500, "SMS_NOT_CONFIGURED", "پیکربندی SMS.ir یافت نشد.");
+  if (!config.apiKey.trim()) throw new ApiError(503, "SMS_IR_API_KEY_MISSING", "کلید API برای دریافت خطوط SMS.ir ثبت نشده است.");
+  if (config.sandboxMode) throw new ApiError(409, "SMS_IR_SANDBOX_ACTIVE", "برای بررسی خطوط واقعی، حالت Sandbox در تنظیمات SMS.ir را خاموش کنید.");
+
+  const extra = (config.extraConfig ?? {}) as Record<string, unknown>;
+  const baseUrl = String(extra.base_url || "https://api.sms.ir/v1").replace(/\/$/, "");
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/line`, {
+      method: "GET",
+      headers: { Accept: "application/json", "X-API-KEY": config.apiKey },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "ارتباط با SMS.ir برقرار نشد.";
+    throw new ApiError(502, "SMS_IR_LINE_LOOKUP_FAILED", `دریافت خطوط از SMS.ir ناموفق بود: ${message}`);
+  }
+
+  const data = (await response.json().catch(() => ({}))) as { status?: number; message?: string; data?: unknown };
+  if (!response.ok || (data.status !== undefined && ![1, 200].includes(data.status))) {
+    throw new ApiError(502, "SMS_IR_LINE_LOOKUP_FAILED", `SMS.ir خطوط حساب را برنگرداند (HTTP ${response.status}${data.status !== undefined ? `، کد ${data.status}` : ""}): ${data.message || "خطای نامشخص"}`);
+  }
+  if (!Array.isArray(data.data)) {
+    throw new ApiError(502, "SMS_IR_LINE_RESPONSE_INVALID", "پاسخ فهرست خطوط SMS.ir قالب معتبر ندارد.");
+  }
+
+  const lines = [...new Set(data.data.map((line) => normalizeSmsIrLineNumber(String(line))))];
+  let configuredLineNumber: string | null = null;
+  try {
+    configuredLineNumber = normalizeSmsIrLineNumber(config.lineNumber);
+  } catch {
+    configuredLineNumber = null;
+  }
+  return {
+    provider: "SMS_IR" as const,
+    line_numbers: lines,
+    configured_line_number: configuredLineNumber,
+    configured_line_matches: configuredLineNumber !== null && lines.includes(configuredLineNumber),
+  };
 }
 
 /**
@@ -115,7 +174,7 @@ export async function sendSmsViaGateway(params: {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Accept: "text/plain",
+            Accept: "application/json",
             "X-API-KEY": config.apiKey,
           },
           body: JSON.stringify({
@@ -134,29 +193,39 @@ export async function sendSmsViaGateway(params: {
         }
         providerMessageId = String(data.data?.messageId ?? `smsir-${Date.now()}`);
       } else {
-        // Official SMS.ir Bulk/Single Send API
-        const res = await fetch(`${baseUrl}/send/bulk`, {
+        // Match Organо's working direct-message method: POST /v1/send.
+        // SMS.ir accepts the sender line as a number; keep the same default line
+        // used by Organо when no sender line is configured.
+        const lineDigits = normalizeIranDigits(config.lineNumber).replace(/\D/g, "");
+        const lineNumber = Number(lineDigits) || 30007732000000;
+        const res = await fetch(`${baseUrl}/send`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Accept: "text/plain",
             "X-API-KEY": config.apiKey,
           },
-          body: JSON.stringify({
-            lineNumber: Number(config.lineNumber) || config.lineNumber,
-            messageText: params.message,
-            mobiles: [normalizedMobile],
-          }),
+          body: JSON.stringify({ lineNumber, messageText: params.message, mobiles: [normalizedMobile] }),
         });
-        const data = (await res.json().catch(() => ({}))) as {
-          status?: number;
-          message?: string;
-          data?: { packId?: string };
-        };
-        if (!res.ok || (data.status !== undefined && data.status !== 1)) {
-          throw new Error(data.message || `SMS.ir HTTP ${res.status}`);
+        const rawResponse = await res.text();
+        const response = rawResponse.slice(0, 500);
+        const data = (() => {
+          try {
+            return JSON.parse(rawResponse) as {
+              status?: number;
+              message?: string;
+              data?: { messageId?: number | string; packId?: string };
+            };
+          } catch {
+            return null;
+          }
+        })();
+        if (!res.ok || ![1, 2].includes(Number(data?.status))) {
+          const providerMessage = data?.message || response || "خطای نامشخص";
+          const invalidLine = /(?:خط|line).{0,40}(?:نامعتبر|invalid)|(?:نامعتبر|invalid).{0,40}(?:خط|line)/i.test(providerMessage);
+          const lineHint = invalidLine ? " خط ارسال ذخیره‌شده را در تنظیمات SMS.ir بررسی کنید." : "";
+          throw new Error(`SMS.ir ارسال مستقیم را نپذیرفت (HTTP ${res.status}${data?.status !== undefined ? `، کد ${data.status}` : ""}): ${providerMessage}.${lineHint}`);
         }
-        providerMessageId = String(data.data?.packId ?? `smsir-${Date.now()}`);
+        providerMessageId = String(data?.data?.messageId ?? data?.data?.packId ?? `smsir-${Date.now()}`);
       }
     } else if (config.provider === "KAVENEGAR") {
       const extra = (config.extraConfig ?? {}) as Record<string, unknown>;

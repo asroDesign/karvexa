@@ -7,7 +7,7 @@ import { ensureSeeded } from "@/db/seed";
 import { recordAuditLog } from "@/lib/audit";
 import { handleApiError, ok } from "@/lib/errors";
 import { requirePlatformAdmin } from "@/lib/tenant";
-import { maskSecretKey, sendSmsViaGateway } from "@/modules/sms/service";
+import { getSmsIrLineNumbers, maskSecretKey, sendSmsViaGateway } from "@/modules/sms/service";
 
 const updateSmsSchema = z.object({
   provider: z.enum(["SMS_IR", "KAVENEGAR"]),
@@ -32,6 +32,11 @@ export async function GET(req: NextRequest) {
   try {
     await ensureSeeded();
     await requirePlatformAdmin(req, "platform.settings.manage");
+
+    if (req.nextUrl.searchParams.get("action") === "lines") {
+      z.enum(["SMS_IR"]).parse(req.nextUrl.searchParams.get("provider") || "SMS_IR");
+      return ok(await getSmsIrLineNumbers());
+    }
 
     const [providers, logs] = await Promise.all([
       db.select().from(smsSettings),

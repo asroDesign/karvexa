@@ -151,10 +151,10 @@
     "semantic_hash": "415c873451964a204c2f359b14ea27ec"
   },
   "src/app/api/v1/platform/sms/route.ts": {
-    "mtime": 1794905442.0,
-    "seen": 1794930384.471182,
-    "ast_hash": "034e129baefd4cfb428305b4e4f835b5",
-    "semantic_hash": "034e129baefd4cfb428305b4e4f835b5"
+    "mtime": 1795103186.2563648,
+    "seen": 1795103302.146977,
+    "ast_hash": "4368fcde73cbb354323c93b04dc6a778",
+    "semantic_hash": ""
   },
   "src/app/api/v1/platform/tickets/route.ts": {
     "mtime": 1795024046.8231547,
@@ -247,9 +247,9 @@
     "semantic_hash": "ff756820a2e3b00562e5f6c9db8dd0a6"
   },
   "src/components/OrgWorkspace.tsx": {
-    "mtime": 1795094187.53676,
-    "seen": 1795096832.987812,
-    "ast_hash": "cb038f7e4d7c8946f786db686786a33f",
+    "mtime": 1795100553.0372865,
+    "seen": 1795102158.4432142,
+    "ast_hash": "99ca9a936dea64ae28b5dead3906dce3",
     "semantic_hash": ""
   },
   "src/components/PlatformAdminPortal.tsx": {
@@ -259,10 +259,10 @@
     "semantic_hash": "bac2479dfa8e93b9ae6bf0ff3a22e523"
   },
   "src/components/PlatformSaasAdmin.tsx": {
-    "mtime": 1794905442.0,
-    "seen": 1794930384.471196,
-    "ast_hash": "a929e154e7d5b91a4f72ded0d0191e27",
-    "semantic_hash": "a929e154e7d5b91a4f72ded0d0191e27"
+    "mtime": 1795103330.344714,
+    "seen": 1795103358.236367,
+    "ast_hash": "085ad285980a36a2d7111caa8655a5f7",
+    "semantic_hash": ""
   },
   "src/components/RichTextEditor.tsx": {
     "mtime": 1794905442.0,
@@ -301,10 +301,10 @@
     "semantic_hash": "b9c5917edbf7edb1de14b9b4661f0adf"
   },
   "src/db/schema.ts": {
-    "mtime": 1795023953.386717,
-    "seen": 1795024602.386492,
-    "ast_hash": "46962247f6060c48c82b8ef3c7254bbb",
-    "semantic_hash": "46962247f6060c48c82b8ef3c7254bbb"
+    "mtime": 1795103563.0828724,
+    "seen": 1795103731.6970298,
+    "ast_hash": "0cf380a42ab50715ccde4ba7718268b1",
+    "semantic_hash": ""
   },
   "src/db/seed-prompt05.ts": {
     "mtime": 1794996053.0113673,
@@ -457,9 +457,9 @@
     "semantic_hash": "294ce640f588e26de680732ce30420a7"
   },
   "src/modules/inventory/controller.ts": {
-    "mtime": 1795097083.3883033,
-    "seen": 1795097165.502523,
-    "ast_hash": "10ae18909db72a9b9aafe31b7d900cb0",
+    "mtime": 1795103592.2274466,
+    "seen": 1795103731.6970549,
+    "ast_hash": "59a88ed0d33584a4aea8d22713c8af01",
     "semantic_hash": ""
   },
   "src/modules/inventory/prompt08.service.ts": {
@@ -469,9 +469,9 @@
     "semantic_hash": "5bd2c293aa6df247eeb1c40afd696ccd"
   },
   "src/modules/inventory/service.ts": {
-    "mtime": 1795097106.4476852,
-    "seen": 1795097165.5025249,
-    "ast_hash": "807f085eedb1b19c528ef27261fba1e4",
+    "mtime": 1795103621.282933,
+    "seen": 1795103731.697057,
+    "ast_hash": "4e27bb42b2fd3dea46f5d8919811db53",
     "semantic_hash": ""
   },
   "src/modules/offline-mode/controller.ts": {
@@ -511,10 +511,10 @@
     "semantic_hash": "77b3f8ae2afda3a3df5436e7c8d8bf43"
   },
   "src/modules/sms/service.ts": {
-    "mtime": 1795079709.1016002,
-    "seen": 1795087087.925847,
-    "ast_hash": "eab79e37f5ce07a51bed601b9e0a40a5",
-    "semantic_hash": "eab79e37f5ce07a51bed601b9e0a40a5"
+    "mtime": 1795105211.7527199,
+    "seen": 1795105226.827807,
+    "ast_hash": "16b1ffab751ad88fbef0bc674f6db0cf",
+    "semantic_hash": ""
   },
   "src/modules/subscription/controller.ts": {
     "mtime": 1795091553.9234517,
@@ -901,9 +901,9 @@
     "semantic_hash": "fa38e782c4f127d137afb0f5faa6fbc4"
   },
   "src/components/BusinessParityPanels.tsx": {
-    "mtime": 1795097251.6360514,
-    "seen": 1795097331.1683772,
-    "ast_hash": "b9b4fe9a34fc83dddf8fc0173f78d07c",
+    "mtime": 1795103655.066937,
+    "seen": 1795103731.697006,
+    "ast_hash": "df189c060939fde513a17d8d0df57ec5",
     "semantic_hash": ""
   },
   "src/components/PwaRegistration.tsx": {
@@ -994,6 +994,18 @@
     "mtime": 1795093411.9424038,
     "seen": 1795096832.9878159,
     "ast_hash": "caba99d141fe5e53e3487989071d197a",
+    "semantic_hash": ""
+  },
+  "src/components/SupplierAccountsPanel.tsx": {
+    "mtime": 1795100704.4320176,
+    "seen": 1795102158.443223,
+    "ast_hash": "bb1e886273d919c0f966837105134151",
+    "semantic_hash": ""
+  },
+  "src/db/migrations/2026-11-19-stock-count-item-variants.sql": {
+    "mtime": 1795103563.0831864,
+    "seen": 1795103731.6970282,
+    "ast_hash": "60805a9ac7798b70d3e8e14187554e4d",
     "semantic_hash": ""
   },
   "yarn.lock": {

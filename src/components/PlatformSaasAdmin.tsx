@@ -18,6 +18,20 @@ import {
 import { apiFetch, formatDateTimeFa } from "@/lib/format";
 import { RichTextEditor } from "./RichTextEditor";
 
+interface SmsIrLineLookup {
+  provider: "SMS_IR";
+  line_numbers: string[];
+  configured_line_number: string | null;
+  configured_line_matches: boolean;
+}
+
+function normalizeSmsLineForCompare(value: unknown) {
+  return String(value ?? "")
+    .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[\s,٬]/g, "");
+}
+
 interface PlatformSaasAdminProps {
   mode: "academy" | "sms" | "inquiries" | "gateways";
   onToast: (msg: string, type?: "success" | "error") => void;
@@ -48,6 +62,7 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
   const [smsProviders, setSmsProviders] = useState<Array<Record<string, unknown>>>([]);
   const [smsLogsList, setSmsLogsList] = useState<Array<Record<string, unknown>>>([]);
   const [smsDrafts, setSmsDrafts] = useState<Record<string, Record<string, unknown>>>({});
+  const [smsLineLookups, setSmsLineLookups] = useState<Record<string, { loading: boolean; result?: SmsIrLineLookup }>>({});
   const [testSmsForm, setTestSmsForm] = useState({
     provider: "SMS_IR" as "SMS_IR" | "KAVENEGAR",
     mobile: "09121000001",
@@ -243,6 +258,26 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
       loadData();
     } catch (err) {
       onToast(err instanceof Error ? err.message : "خطا در ذخیره تنظیمات پیامک", "error");
+    }
+  }
+
+  async function loadSmsIrLines(providerCode: string) {
+    setSmsLineLookups((current) => ({ ...current, [providerCode]: { loading: true, result: current[providerCode]?.result } }));
+    try {
+      const result = await apiFetch<SmsIrLineLookup>(
+        `/api/v1/platform/sms?action=lines&provider=${encodeURIComponent(providerCode)}`
+      );
+      setSmsLineLookups((current) => ({ ...current, [providerCode]: { loading: false, result } }));
+      if (result.configured_line_matches) {
+        onToast("خط تنظیم‌شده در فهرست خطوط مجاز همین کلید SMS.ir است.");
+      } else if (result.line_numbers.length) {
+        onToast("خط فعلی در فهرست مجاز این کلید نیست؛ یکی از خطوط دریافتی را انتخاب و ذخیره کنید.", "error");
+      } else {
+        onToast("برای این کلید SMS.ir خط ارسال فعالی برنگشت.", "error");
+      }
+    } catch (error) {
+      setSmsLineLookups((current) => ({ ...current, [providerCode]: { loading: false, result: current[providerCode]?.result } }));
+      onToast(error instanceof Error ? error.message : "دریافت خطوط مجاز SMS.ir ناموفق بود.", "error");
     }
   }
 
@@ -541,6 +576,8 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
             const code = String(p.provider);
             const draft = smsDrafts[code] ?? {};
             const isSmsIr = code === "SMS_IR";
+            const lineLookup = smsLineLookups[code];
+            const currentLineMatches = Boolean(lineLookup?.result && lineLookup.result.line_numbers.includes(normalizeSmsLineForCompare(draft.line_number)));
             return (
               <div key={code} className="glass-primary p-5 space-y-4 text-xs">
                 <div className="flex items-center justify-between border-b border-slate-200/60 pb-3">
@@ -610,15 +647,34 @@ export function PlatformSaasAdmin({ mode, onToast }: PlatformSaasAdminProps) {
                     />
                   </div>
                   <div>
-                    <label className="block font-medium mb-1">شماره خط ارسال‌کننده (Line / Sender)</label>
+                    <label className="block font-medium mb-1">{isSmsIr ? "شناسهٔ عددی خط ارسال SMS.ir" : "شماره خط ارسال‌کننده (Line / Sender)"}</label>
                     <input
                       dir="ltr"
+                      inputMode={isSmsIr ? "numeric" : undefined}
                       value={String(draft.line_number ?? "")}
                       onChange={(e) =>
                         setSmsDrafts((prev) => ({ ...prev, [code]: { ...draft, line_number: e.target.value } }))
                       }
+                      placeholder={isSmsIr ? "شناسهٔ خط از فهرست SMS.ir" : undefined}
                       className="w-full glass-input px-3 py-2 font-mono text-left"
                     />
+                    {isSmsIr && <div className="mt-2 space-y-2">
+                      <p className="text-[10px] leading-5 text-slate-500">ارسال پیامک تست عادی از Bulk API و همین شناسه استفاده می‌کند؛ OTP دارای TemplateId از مسیر Verify ارسال می‌شود. دریافت خطوط مجاز پیامکی نمی‌فرستد.</p>
+                      <button type="button" disabled={lineLookup?.loading} onClick={() => void loadSmsIrLines(code)} className="rounded-lg border border-violet-200 px-3 py-1.5 text-[10px] font-semibold text-violet-700 disabled:opacity-50">
+                        {lineLookup?.loading ? "در حال دریافت خطوط…" : "دریافت خطوط مجاز از SMS.ir"}
+                      </button>
+                      {lineLookup?.result && <div className="rounded-lg bg-slate-50 p-2">
+                        <p className={`text-[10px] ${currentLineMatches ? "text-emerald-700" : "text-amber-700"}`}>
+                          {currentLineMatches ? "خط فعلی متعلق به همین کلید است." : `خط فعلی (${String(draft.line_number || "ثبت‌نشده")}) در خطوط این کلید نیست؛ یکی از خطوط زیر را انتخاب کنید.`}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {lineLookup.result.line_numbers.map((lineNumber) => <button key={lineNumber} type="button" onClick={() => setSmsDrafts((prev) => ({ ...prev, [code]: { ...draft, line_number: lineNumber } }))} className={`rounded-md border px-2 py-1 font-mono text-[10px] ${normalizeSmsLineForCompare(draft.line_number) === lineNumber ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-700"}`}>
+                            {lineNumber}{normalizeSmsLineForCompare(draft.line_number) === lineNumber ? " • انتخاب‌شده" : ""}
+                          </button>)}
+                          {!lineLookup.result.line_numbers.length && <span className="text-[10px] text-slate-500">این کلید خط فعالی ندارد.</span>}
+                        </div>
+                      </div>}
+                    </div>}
                   </div>
                   <div>
                     <label className="block font-medium mb-1">
