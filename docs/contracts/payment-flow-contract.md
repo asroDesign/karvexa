@@ -6,8 +6,8 @@
    - Server validates plan & active configured gateway, creates `payment_orders` (`PENDING`), invokes the gateway adapter, and returns `{ order_id, payment_reference, gateway, payment_url, expires_at }`.
 2. **User Pays in Browser / Gateway Page**: Android opens `payment_url`.
 3. **Merchant Server Callback & Verification**: `GET/POST /api/v1/payments/callback/{gateway}` (and browser result page `/payments/result/[reference]`):
-   - Verifies payment directly with the gateway's official verification API (or sandbox validator when `sandbox_mode = true`), protects against duplicate callbacks (`status === 'VERIFIED'` idempotently returns success without double-extending subscription), activates `subscriptions` + increments `entitlement_version`, and displays a verified **"بازگشت به اپلیکیشن"** button targeting `karvexa://payment/result?reference=<ref>&status=verified` (Android App Link).
-4. **Authoritative Refresh**: Upon App Link resume, Android calls `GET /api/v1/subscription/orders/{reference}` and `GET /api/v1/subscription/entitlements` — NEVER trusting deep-link parameters alone!
+   - Verifies payment directly with the gateway's verification API (or sandbox validator when `sandbox_mode = true`), protects against duplicate callbacks (`status === 'VERIFIED'` idempotently returns success without double-extending subscription), activates `subscriptions` + increments `entitlement_version`, and displays a **"بازگشت به اپلیکیشن"** button targeting `karvexa://payment/result?reference=<ref>` only. The app then queries the backend for authoritative payment and entitlement state; URL flags are never trusted.
+4. **Authoritative Refresh**: Upon App Link resume, Android calls `GET /api/v1/subscription/payments/{reference}/status` and refreshes `GET /api/v1/subscription/entitlements` — NEVER trusting deep-link parameters alone! The payment-status request also refreshes a still-pending order from its gateway before returning the server-authoritative state.
 
 ## 2. Four Independent Gateway Adapters (`src/modules/payments/gateways.ts`)
 | Gateway Code | Official Request Endpoint | Official Verify Endpoint | Auth Credential |

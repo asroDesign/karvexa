@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { db } from "@/db";
 import {
   entitlements,
@@ -51,10 +51,10 @@ export interface PaymentGatewayAdapter {
     order: typeof paymentOrders.$inferSelect;
     callbackParams: Record<string, string>;
   }): Promise<GatewayVerifyResult>;
-  retrieveStatus?(params: {
+  retrieveStatus(params: {
     config: typeof paymentGatewaySettings.$inferSelect;
     order: typeof paymentOrders.$inferSelect;
-  }): Promise<{ status: string; refId: string | null }>;
+  }): Promise<GatewayVerifyResult>;
 }
 
 // ============================================================================
@@ -140,6 +140,10 @@ const zarinpalAdapter: PaymentGatewayAdapter = {
       raw: json as Record<string, unknown>,
     };
   },
+
+  async retrieveStatus({ config, order }) {
+    return this.verifyPayment({ config, order, callbackParams: {} });
+  },
 };
 
 // ============================================================================
@@ -221,6 +225,10 @@ const zibalAdapter: PaymentGatewayAdapter = {
       raw: json as Record<string, unknown>,
     };
   },
+
+  async retrieveStatus({ config, order }) {
+    return this.verifyPayment({ config, order, callbackParams: {} });
+  },
 };
 
 // ============================================================================
@@ -288,6 +296,10 @@ const ballehPayAdapter: PaymentGatewayAdapter = {
       statusCode: String(json.result?.status ?? res.status),
       raw: json as Record<string, unknown>,
     };
+  },
+
+  async retrieveStatus({ config, order }) {
+    return this.verifyPayment({ config, order, callbackParams: {} });
   },
 };
 
@@ -380,6 +392,10 @@ const samanAdapter: PaymentGatewayAdapter = {
       statusCode: String(json.ResultCode ?? res.status),
       raw: json as Record<string, unknown>,
     };
+  },
+
+  async retrieveStatus({ config, order }) {
+    return this.verifyPayment({ config, order, callbackParams: {} });
   },
 };
 
@@ -621,6 +637,7 @@ export async function processPaymentGatewayCallback(params: {
   gatewayParam: string;
   callbackParams: Record<string, string>;
   ipAddress?: string | null;
+  verificationResult?: GatewayVerifyResult;
 }) {
   await ensureSaasSeeded();
   const gatewayCode = params.gatewayParam.toUpperCase() as PaymentGatewayCode;
@@ -687,15 +704,29 @@ export async function processPaymentGatewayCallback(params: {
 
   // Expired Payment Session Protection (Prompt 09A §12)
   if (order.expiresAt.getTime() <= Date.now()) {
-    await db
+    const [expiredOrder] = await db
       .update(paymentOrders)
       .set({ status: "EXPIRED", updatedAt: new Date() })
-      .where(eq(paymentOrders.id, order.id));
+      .where(and(eq(paymentOrders.id, order.id), ne(paymentOrders.status, "VERIFIED")))
+      .returning();
+    if (!expiredOrder) {
+      const [currentOrder] = await db.select().from(paymentOrders).where(eq(paymentOrders.id, order.id)).limit(1);
+      if (currentOrder?.status === "VERIFIED") {
+        const snapshot = await buildSignedEntitlementSnapshot(currentOrder.organizationId);
+        return {
+          verified: true,
+          already_verified: true,
+          order: currentOrder,
+          entitlements: snapshot,
+          deep_link_url: `${currentOrder.returnDeepLink}?reference=${encodeURIComponent(currentOrder.paymentReference)}`,
+        };
+      }
+    }
     throw new ApiError(410, "PAYMENT_SESSION_EXPIRED", "مهلت زمانی این نشست پرداخت به پایان رسیده است.");
   }
 
   // Official Server-Side Verification via Gateway Adapter
-  const verifyRes = await adapter.verifyPayment({
+  const verifyRes = params.verificationResult ?? await adapter.verifyPayment({
     config: gwConfig,
     order,
     callbackParams: params.callbackParams,
@@ -710,8 +741,23 @@ export async function processPaymentGatewayCallback(params: {
         callbackPayload: verifyRes.raw,
         updatedAt: new Date(),
       })
-      .where(eq(paymentOrders.id, order.id))
+      .where(and(eq(paymentOrders.id, order.id), ne(paymentOrders.status, "VERIFIED")))
       .returning();
+
+    if (!failedOrder) {
+      const [currentOrder] = await db.select().from(paymentOrders).where(eq(paymentOrders.id, order.id)).limit(1);
+      if (currentOrder?.status === "VERIFIED") {
+        const snapshot = await buildSignedEntitlementSnapshot(currentOrder.organizationId);
+        return {
+          verified: true,
+          already_verified: true,
+          order: currentOrder,
+          entitlements: snapshot,
+          deep_link_url: `${currentOrder.returnDeepLink}?reference=${encodeURIComponent(currentOrder.paymentReference)}`,
+        };
+      }
+      throw new ApiError(409, "PAYMENT_STATE_CHANGED", "وضعیت پرداخت هم‌زمان تغییر کرده است؛ دوباره وضعیت را بررسی کنید.");
+    }
 
     await recordAuditLog({
       organizationId: order.organizationId,
@@ -736,6 +782,26 @@ export async function processPaymentGatewayCallback(params: {
 
   // Atomic Activation: PaymentTransaction + Subscription + Entitlements + Increment entitlement_version + Notification!
   const activated = await withTenantTransaction(order.organizationId, async (tx) => {
+    const [lockedOrder] = await tx
+      .select()
+      .from(paymentOrders)
+      .where(eq(paymentOrders.id, order.id))
+      .for("update");
+    if (!lockedOrder) {
+      throw new ApiError(404, "PAYMENT_ORDER_NOT_FOUND", "سفارش پرداخت یافت نشد.");
+    }
+    if (lockedOrder.status === "VERIFIED") {
+      return { kind: "ALREADY_VERIFIED" as const, order: lockedOrder };
+    }
+    if (lockedOrder.expiresAt.getTime() <= Date.now()) {
+      const [expiredOrder] = await tx
+        .update(paymentOrders)
+        .set({ status: "EXPIRED", updatedAt: new Date() })
+        .where(eq(paymentOrders.id, lockedOrder.id))
+        .returning();
+      return { kind: "EXPIRED" as const, order: expiredOrder };
+    }
+
     const [plan] = await tx.select().from(plans).where(eq(plans.id, order.planId)).limit(1);
     if (!plan) throw new ApiError(404, "PLAN_NOT_FOUND", "پلن اشتراک یافت نشد.");
 
@@ -842,8 +908,28 @@ export async function processPaymentGatewayCallback(params: {
       .where(eq(paymentOrders.id, order.id))
       .returning();
 
-    return { order: verifiedOrder, subscription: sub, payment: payTx, entitlementVersion: nextVersion };
+    return {
+      kind: "ACTIVATED" as const,
+      order: verifiedOrder,
+      subscription: sub,
+      payment: payTx,
+      entitlementVersion: nextVersion,
+    };
   });
+
+  if (activated.kind === "EXPIRED") {
+    throw new ApiError(410, "PAYMENT_SESSION_EXPIRED", "مهلت زمانی این نشست پرداخت به پایان رسیده است.");
+  }
+  if (activated.kind === "ALREADY_VERIFIED") {
+    const snapshot = await buildSignedEntitlementSnapshot(order.organizationId);
+    return {
+      verified: true,
+      already_verified: true,
+      order: activated.order,
+      entitlements: snapshot,
+      deep_link_url: `${activated.order.returnDeepLink}?reference=${encodeURIComponent(activated.order.paymentReference)}`,
+    };
+  }
 
   await recordAuditLog({
     organizationId: order.organizationId,
@@ -868,4 +954,72 @@ export async function processPaymentGatewayCallback(params: {
     entitlements: snapshot,
     deep_link_url: `${order.returnDeepLink}?reference=${encodeURIComponent(order.paymentReference)}`,
   };
+}
+
+export async function refreshPendingPaymentOrderStatus(params: {
+  order: typeof paymentOrders.$inferSelect;
+  ipAddress?: string | null;
+}) {
+  const { order } = params;
+  if (order.status !== "PENDING" || order.expiresAt.getTime() <= Date.now()) {
+    return { order, providerStatusCode: null as string | null, failureReason: null as string | null };
+  }
+  const gatewayAuthority = order.gatewayAuthority;
+  if (!gatewayAuthority) {
+    return { order, providerStatusCode: null, failureReason: "PAYMENT_GATEWAY_REFERENCE_MISSING" };
+  }
+
+  const gatewayCode = order.gateway as PaymentGatewayCode;
+  const adapter = GATEWAY_ADAPTERS[gatewayCode];
+  if (!adapter) {
+    return { order, providerStatusCode: null, failureReason: "PAYMENT_GATEWAY_UNSUPPORTED" };
+  }
+  const [config] = await db
+    .select()
+    .from(paymentGatewaySettings)
+    .where(eq(paymentGatewaySettings.gateway, gatewayCode))
+    .limit(1);
+  if (!config) {
+    return { order, providerStatusCode: null, failureReason: "PAYMENT_GATEWAY_NOT_CONFIGURED" };
+  }
+
+  let providerStatus: GatewayVerifyResult;
+  try {
+    providerStatus = await adapter.retrieveStatus({ config, order });
+  } catch {
+    return { order, providerStatusCode: null, failureReason: "PAYMENT_STATUS_UNAVAILABLE" };
+  }
+  if (!providerStatus.verified) {
+    return { order, providerStatusCode: providerStatus.statusCode, failureReason: null };
+  }
+
+  const callbackParams: Record<string, string> = {
+    ref: order.paymentReference,
+  };
+  switch (gatewayCode) {
+    case "ZARINPAL":
+      callbackParams.Authority = gatewayAuthority;
+      callbackParams.Status = "OK";
+      break;
+    case "ZIBAL":
+      callbackParams.trackId = gatewayAuthority;
+      callbackParams.success = "1";
+      break;
+    case "BALLEH_PAY":
+      callbackParams.transaction_id = gatewayAuthority;
+      callbackParams.status = "PAID";
+      break;
+    case "SAMAN":
+      callbackParams.RefNum = gatewayAuthority;
+      callbackParams.State = "OK";
+      break;
+  }
+
+  const processed = await processPaymentGatewayCallback({
+    gatewayParam: gatewayCode,
+    callbackParams,
+    ipAddress: params.ipAddress,
+    verificationResult: providerStatus,
+  });
+  return { order: processed.order, providerStatusCode: providerStatus.statusCode, failureReason: null };
 }

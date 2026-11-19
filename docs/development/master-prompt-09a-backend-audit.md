@@ -9,20 +9,30 @@
 - **Offline-Only & Cloud Migration**: `organization_operating_modes`, `cloud_migration_sessions`, `sync_inbox`, `sync_change_log` with opaque cursor.
 - **Subscriptions & 4 Payment Gateways**: Versioned signed entitlements + Zarinpal, Zibal, Balleh Pay, Saman adapters + `/payments/result/[reference]` browser return page.
 
-## 2. Missing Gaps Identified Against Master Prompt 09A
-1. **`invoice_payment_allocations`**: Missing `contact_id` & `cheque_id` FKs and explicit persistence of `CREDIT` / `ACCOUNT_BALANCE` settlement allocation rows alongside immediate allocations.
-2. **Supplier Account Endpoints**: Need `GET /api/v1/suppliers/{id}/account`, `GET /api/v1/suppliers/{id}/transactions`, and `GET /api/v1/suppliers/{id}/settlements` (filterable by `date_from`, `date_to`, `payment_method`) in addition to `/profile` and `POST /settlements`.
-3. **Warehouse Transfers**: Need distinct `POST /submit` (`DRAFT -> SUBMITTED`) separate from `POST /dispatch` (`IN_TRANSIT`), mandatory `Idempotency-Key` support on `/dispatch` & `/receive`, and item-level `discrepancy_type`, `rejected_quantity`, `evidence_attachment_ids` columns.
-4. **Inventory Export Alias**: Add `GET /api/v1/inventory/exports/transactions` alongside `/movements`.
-5. **Cheque Version Conflict Guard**: Enforce optimistic `version` check (`409 VERSION_CONFLICT`) on `PATCH /api/v1/cheques/{id}`.
-6. **Treasury Accounts `PUT`**: Support `PUT /api/v1/treasury/accounts/{id}` in addition to `PATCH`.
-7. **Initial Migration Endpoints (§10)**: Add canonical `POST /api/v1/sync/initial-migration`, `GET /api/v1/sync/initial-migration/{id}`, `POST /api/v1/sync/initial-migration/{id}/resume`, `POST /api/v1/sync/initial-migration/{id}/confirm` backed by `cloud_migration_sessions`.
-8. **Subscriptions Plural Routes & Exact Entitlement Contract (§11)**: Support `/api/v1/subscriptions/*` alongside `/api/v1/subscription/*`; include `subscription_id`, `plan_id`, `plan_name`, `status`, `activated_at`, `expires_at`, `entitlement_version`, `enabled_features[]`, `feature_limits{}`, `server_time` + pull-fallback `GET /api/v1/subscriptions/entitlements/version`.
-9. **Payment Gateways Priority, Expiry & Status Retrieval (§12)**: Add `priority` column on `payment_gateway_settings` (configurable in Admin Panel), enforce expired session guard (`410 PAYMENT_SESSION_EXPIRED`) on callback verification, and implement `retrieveStatus` across all 4 gateway adapters.
-10. **Safe Deep-Link Return (§13)**: Strip `status=verified` from the App Link URL (`karvexa://payment/result?reference=<ref>` only) so Android NEVER trusts client-side URL flags and always queries the backend for authoritative status!
+## 2. Verified Status Against Master Prompt 09A (2026-11-19)
 
-## 3. Non-Destructive Schema Migration Plan
-- `ALTER TABLE invoice_payment_allocations ADD COLUMN contact_id UUID, ADD COLUMN cheque_id UUID`
-- `ALTER TABLE stock_transfer_items ADD COLUMN quantity_rejected NUMERIC(18,4) DEFAULT 0, ADD COLUMN discrepancy_type VARCHAR(32), ADD COLUMN evidence_attachment_ids JSONB DEFAULT '[]'`
-- `ALTER TABLE payment_gateway_settings ADD COLUMN priority INTEGER DEFAULT 10`
-- Zero destructive drops; 100% backward compatible with existing data and Android v1.x clients.
+The original gap list below was stale. A source review of the current backend found these requirements implemented:
+
+| Requirement | Status | Current implementation evidence |
+|---|---|---|
+| Persist contact and cheque references, including credit/account-balance allocations | Implemented | `src/db/schema.ts`; `src/modules/commerce/service.ts` |
+| Supplier account, transaction, settlement list and create APIs | Implemented | `src/modules/inventory/controller.ts`; supplier account/settlement services |
+| Submit, dispatch, partial receive, discrepancies, evidence, idempotency | Implemented | `src/modules/inventory/controller.ts`; `src/modules/inventory/service.ts`; `src/db/schema.ts` |
+| Stock and transaction Excel exports, including `/exports/transactions` alias | Implemented | `src/modules/inventory/controller.ts` |
+| Cheque optimistic version conflict guard | Implemented | cheque update handler in `src/modules/treasury/controller.ts` |
+| Treasury metadata `PUT`/`PATCH` with immutable history | Implemented | treasury account handler in `src/modules/treasury/controller.ts` |
+| Cloud/initial migration start, resume, status, and confirmation aliases | Implemented | `src/modules/offline-mode/controller.ts`; route delegation in `src/modules/subscription/controller.ts` |
+| Plural subscription routes, entitlement snapshot and version polling fallback | Implemented | `src/modules/subscription/controller.ts`; `buildSignedEntitlementSnapshot` in `src/modules/payments/gateways.ts` |
+| Gateway priority, callback expiry guard, and four provider status adapters | Implemented | `src/db/schema.ts`; `src/app/api/v1/platform/payment-gateways/route.ts`; `src/modules/payments/gateways.ts` |
+| Safe opaque payment return link and server-side status lookup | Implemented | callback results in `src/modules/payments/gateways.ts`; status route in `src/modules/subscription/controller.ts` |
+
+The status endpoint now queries a pending order through its adapter's existing provider verification/inquiry operation. Only a verified result enters the subscription activation path. Activation locks the payment-order row and rechecks its state inside the transaction so a simultaneous callback or status request cannot extend the subscription twice. It does not trust app-link query flags or add provider endpoint paths.
+
+## 3. Remaining Validation and Risks
+
+- TypeScript typecheck and ESLint pass for the payment gateway and subscription controller changes.
+- Live end-to-end payment verification remains unverified because merchant credentials and provider sandbox transactions are not available in this checkout.
+- The backend production build previously ended with a Next.js `SecurityFatalError` after static generation. No dependency/security upgrade has been applied; rerun that build after its approval and environment investigation.
+- Payment status refresh keeps an unverified provider response pending and reports provider unavailability without activating an entitlement.
+
+No additional schema migration is indicated by this source review. The historical zero-destructive migration plan has therefore been removed from the current gap list.

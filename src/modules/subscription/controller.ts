@@ -23,6 +23,7 @@ import {
   initiateSubscriptionUpgrade,
   PaymentGatewayCode,
   processPaymentGatewayCallback,
+  refreshPendingPaymentOrderStatus,
 } from "@/modules/payments/gateways";
 import { handleCloudMigrationRoutes } from "@/modules/offline-mode/controller";
 import { getClientIp } from "@/lib/auth";
@@ -951,7 +952,17 @@ export async function handlePaymentCallbackRoutes(
         .limit(1);
     }
     if (!order) throw new ApiError(404, "PAYMENT_ORDER_NOT_FOUND", "سفارش پرداخت یافت نشد.");
+    const refreshed = await refreshPendingPaymentOrderStatus({
+      order,
+      ipAddress: getClientIp(req),
+    });
+    order = refreshed.order;
     const snapshot = await buildSignedEntitlementSnapshot(ctx.organizationId);
+    const displayStatus = order.status === "VERIFIED"
+      ? "PAID"
+      : order.status === "PENDING" && order.expiresAt.getTime() <= Date.now()
+        ? "EXPIRED"
+        : order.status;
     return ok({
       payment_id: order.paymentReference,
       invoice_id: order.id,
@@ -959,9 +970,9 @@ export async function handlePaymentCallbackRoutes(
       gateway: order.gateway,
       amount: order.amountIrr,
       currency_code: order.currency,
-      status: order.status === "VERIFIED" ? "PAID" : order.status,
+      status: displayStatus,
       reference_code: order.gatewayRefId,
-      failure_reason: null,
+      failure_reason: refreshed.failureReason,
       verified_at_ms: order.verifiedAt?.getTime() ?? null,
       subscription_activated: order.status === "VERIFIED",
       entitlement_version: snapshot.entitlement_version,
