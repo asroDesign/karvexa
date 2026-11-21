@@ -1208,7 +1208,7 @@ async function processSingleSyncEvent(params: {
           referenceType: isUuid(p.reference_id) ? "DOCUMENT" : null,
           referenceId: isUuid(p.reference_id) ? String(p.reference_id) : null,
           description: String(p.description || "").slice(0, 2000),
-          createdBy: userId,
+          createdBy: params.userId,
           createdAt,
         })
         .returning();

@@ -1,7 +1,7 @@
 # Graph Report - karvexa  (2026-11-21)
 
 ## Corpus Check
-- 117 files · ~212,252 words
+- 117 files · ~212,253 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 4 file(s) not represented in the graph (top: (none) 1, .ico 1, .css 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `5f5c800e`
+- Built from commit: `485b14e4`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -150,12 +150,12 @@
 2. `recordAuditLog()` - 107 edges
 3. `apiFetch()` - 107 edges
 4. `ok()` - 103 edges
-5. `withTenantTransaction()` - 73 edges
-6. `ensureSeeded()` - 73 edges
-7. `formatDecimal()` - 66 edges
-8. `parseDecimal()` - 66 edges
+5. `ensureSeeded()` - 73 edges
+6. `withTenantTransaction()` - 73 edges
+7. `parseDecimal()` - 66 edges
+8. `formatDecimal()` - 66 edges
 9. `drizzle-orm` - 65 edges
-10. `addDec()` - 63 edges
+10. `db` - 63 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Shared Modular Monolith Core` --semantically_similar_to--> `Modular Monolith`  [INFERRED] [semantically similar]
@@ -514,14 +514,14 @@ Nodes (4): bootstrapOrganizationDefaults(), dayBeforeIso(), ensurePrompt05Seeded
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `next` connect `ok` to `ApiError`, `auth/controller.ts`, `treasury/controller.ts`, `sync/service.ts`, `accounting/controller.ts`, `ensureSeeded`, `sitemap.ts`, `seed.ts`, `subscription/controller.ts`, `Fiscal Year Lifecycle`, `Architecture Decisions`, `react`, `package.json`?**
-  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Why does `apiFetch()` connect `apiFetch` to `auth/controller.ts`, `OrgWorkspace.tsx`, `sync/service.ts`, `Server-Authoritative Entitlement Snapshot`, `seed.ts`, `subscription/controller.ts`, `Background Sync Scheduling`, `Module Status Tracker`, `react`?**
+  _High betweenness centrality (0.059) - this node is a cross-community bridge._
 - **What connects `Audit Core Module`, `Catalog Core Module`, `Cheques Core Module` to the rest of the system?**
   _231 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `ApiError` be split into smaller, more focused modules?**
   _Cohesion score 0.08351245919910835 - nodes in this community are weakly interconnected._
-- **Why does `apiFetch()` connect `apiFetch` to `auth/controller.ts`, `OrgWorkspace.tsx`, `sync/service.ts`, `Server-Authoritative Entitlement Snapshot`, `seed.ts`, `subscription/controller.ts`, `Background Sync Scheduling`, `Module Status Tracker`, `react`?**
-  _High betweenness centrality (0.036) - this node is a cross-community bridge._
+- **Why does `next` connect `ok` to `ApiError`, `auth/controller.ts`, `treasury/controller.ts`, `sync/service.ts`, `accounting/controller.ts`, `ensureSeeded`, `sitemap.ts`, `seed.ts`, `subscription/controller.ts`, `Fiscal Year Lifecycle`, `Architecture Decisions`, `react`, `package.json`?**
+  _High betweenness centrality (0.050) - this node is a cross-community bridge._
 - **Should `ok` be split into smaller, more focused modules?**
   _Cohesion score 0.05466364621294199 - nodes in this community are weakly interconnected._
 - **Why does `drizzle-orm` connect `ok` to `ApiError`, `auth/controller.ts`, `treasury/controller.ts`, `schema.ts`, `sync/service.ts`, `accounting/controller.ts`, `seed.ts`, `sitemap.ts`, `ensureSeeded`, `subscription/controller.ts`, `sync/service.ts`, `Architecture Decisions`, `package.json`, `sms/service.ts`?**
