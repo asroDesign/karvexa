@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   accounts,
@@ -11,6 +11,10 @@ import {
   organizations,
   financialTransactions,
   journalEntries,
+  loyaltyMembershipTiers,
+  loyaltyProgramSettings,
+  loyaltyAccounts,
+  loyaltyTransactions,
   products,
   purchaseInvoiceItems,
   purchaseInvoices,
@@ -40,6 +44,7 @@ import {
   type PaymentAllocationInput,
 } from "@/modules/commerce/service";
 import { approveStockCount, postStockDocumentTx } from "@/modules/inventory/service";
+import { createLandedWarehouseReceipt } from "@/modules/inventory/prompt08.service";
 import {
   appendSyncChangeLog,
   decodeSyncCursor,
@@ -52,6 +57,125 @@ const UUID_REGEX =
 
 function isUuid(v: unknown): v is string {
   return typeof v === "string" && UUID_REGEX.test(v);
+}
+
+function optionalEpoch(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean).slice(0, 50) : [];
+}
+
+function contactSyncPayload(contact: typeof contacts.$inferSelect) {
+  return {
+    id: contact.id,
+    organization_id: contact.organizationId,
+    code: contact.code,
+    display_name: contact.name,
+    first_name: contact.firstName,
+    last_name: contact.lastName,
+    company_name: contact.companyName,
+    type: contact.contactType,
+    national_id: contact.nationalCode,
+    economic_code: contact.economicCode,
+    mobile: contact.mobile,
+    phone: contact.phone,
+    email: contact.email,
+    address: contact.address,
+    postal_code: contact.postalCode,
+    credit_limit: contact.creditLimit,
+    opening_balance: contact.openingBalance,
+    notes: contact.notes,
+    is_active: contact.status === "ACTIVE",
+    birth_date_epoch: contact.birthDateEpoch,
+    gender: contact.gender,
+    customer_tags: contact.customerTags,
+    awareness_source: contact.awarenessSource,
+    marketing_consent: contact.marketingConsent,
+    province: contact.province,
+    city: contact.city,
+    branch_local_id: contact.branchLocalId,
+    membership_date_epoch: contact.membershipDateEpoch,
+    customer_segment: contact.customerSegment,
+    supplier_category: contact.supplierCategory,
+    supplier_settlement_method: contact.supplierSettlementMethod,
+    supplier_payment_due_days: contact.supplierPaymentDueDays,
+    supplier_delivery_lead_time_days: contact.supplierDeliveryLeadTimeDays,
+    supplier_bank_name: contact.supplierBankName,
+    supplier_card_number: contact.supplierCardNumber,
+    supplier_sheba: contact.supplierSheba,
+    supplier_bank_account_number: contact.supplierBankAccountNumber,
+  };
+}
+
+function syncDate(value: unknown, fallback: string): string {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const epoch = optionalEpoch(value);
+  return epoch === null ? fallback : new Date(epoch).toISOString().slice(0, 10);
+}
+
+function normalizeChequeDirection(value: unknown): "RECEIVABLE" | "PAYABLE" {
+  const direction = String(value || "RECEIVABLE").toUpperCase();
+  return direction === "OUTGOING" || direction === "PAYABLE" ? "PAYABLE" : "RECEIVABLE";
+}
+
+function normalizeChequeStatus(value: unknown): string {
+  const status = String(value || "RECEIVED").toUpperCase();
+  const mapped: Record<string, string> = {
+    AWAITING_COLLECTION: "IN_CUSTODY",
+    REPLACED: "REISSUED",
+  };
+  return mapped[status] || status;
+}
+
+function chequeSyncPayload(cheque: typeof cheques.$inferSelect) {
+  return {
+    id: cheque.id,
+    organization_id: cheque.organizationId,
+    contact_id: cheque.contactId,
+    financial_account_id: cheque.financialAccountId,
+    direction: cheque.chequeType === "PAYABLE" ? "OUTGOING" : "INCOMING",
+    cheque_number: cheque.sayadId,
+    serial_number: cheque.serialNumber,
+    bank_name: cheque.bankName,
+    branch_name: cheque.branchName,
+    account_number: cheque.accountNumber,
+    amount: cheque.amount,
+    issue_date: cheque.issueDate,
+    due_date: cheque.dueDate,
+    status: cheque.status,
+    related_document_type: cheque.relatedDocumentType,
+    related_document_id: cheque.relatedDocumentId,
+    reference_document_number: cheque.referenceDocumentNumber,
+    reminder_date_epoch: cheque.reminderDateEpoch,
+    notes: cheque.notes,
+  };
+}
+
+/**
+ * Android sends its stable device UUID, while older clients may send the database ID.
+ * Resolve both forms within the active tenant and keep database IDs for sync records.
+ */
+export async function resolveActiveSyncDevice(organizationId: string, deviceIdentifier: string) {
+  const identityCondition = isUuid(deviceIdentifier)
+    ? or(eq(devices.id, deviceIdentifier), eq(devices.deviceUuid, deviceIdentifier))
+    : eq(devices.deviceUuid, deviceIdentifier);
+  const [device] = await db
+    .select()
+    .from(devices)
+    .where(and(eq(devices.organizationId, organizationId), identityCondition))
+    .limit(1);
+
+  if (!device) {
+    throw new ApiError(403, "DEVICE_NOT_REGISTERED", "دستگاه اندروید در این سازمان ثبت نشده است.");
+  }
+  if (device.status !== "ACTIVE") {
+    throw new ApiError(403, "DEVICE_REVOKED", "این دستگاه توسط مدیر سازمان مسدود شده و اجازه همگام‌سازی ندارد.");
+  }
+  return device;
 }
 
 function prepareOfflineInvoice(payload: Record<string, unknown>) {
@@ -389,28 +513,8 @@ export async function pushSyncBatch(params: {
     }
   }
 
-  // Step 3: Validate registered, active, non-revoked device belonging to this tenant
-  const [device] = await db
-    .select()
-    .from(devices)
-    .where(
-      and(
-        eq(devices.id, params.deviceId),
-        eq(devices.organizationId, params.organizationId)
-      )
-    )
-    .limit(1);
-
-  if (!device) {
-    throw new ApiError(403, "DEVICE_NOT_REGISTERED", "دستگاه اندروید در این سازمان ثبت نشده است.");
-  }
-  if (device.status !== "ACTIVE") {
-    throw new ApiError(
-      403,
-      "DEVICE_REVOKED",
-      "این دستگاه از پنل مدیریت ابطال (Revoked) شده است و مجاز به Sync نیست."
-    );
-  }
+  // Resolve Android's stable device UUID or a legacy database ID within this tenant.
+  const device = await resolveActiveSyncDevice(params.organizationId, params.deviceId);
 
   await ensureOrgChangeLogBaseline(params.organizationId);
 
@@ -781,12 +885,39 @@ async function processSingleSyncEvent(params: {
             organizationId,
             code,
             name: displayName,
+            firstName: p.first_name ? String(p.first_name) : null,
+            lastName: p.last_name ? String(p.last_name) : null,
+            companyName: p.company_name ? String(p.company_name) : null,
             contactType: String(p.type || p.contact_type || p.contactType || "CUSTOMER"),
+            nationalCode: p.national_id ? String(p.national_id) : null,
+            economicCode: p.economic_code ? String(p.economic_code) : null,
             mobile: p.mobile ? String(p.mobile) : null,
             phone: p.phone ? String(p.phone) : null,
             email: p.email ? String(p.email) : null,
+            address: p.address ? String(p.address) : null,
+            postalCode: p.postal_code ? String(p.postal_code) : null,
             creditLimit: p.credit_limit ? String(p.credit_limit) : "0.00",
+            openingBalance: p.opening_balance ? String(p.opening_balance) : "0.00",
             notes: p.notes ? String(p.notes) : null,
+            status: p.is_active === false ? "INACTIVE" : "ACTIVE",
+            birthDateEpoch: optionalEpoch(p.birth_date_epoch),
+            gender: String(p.gender || "UNSPECIFIED"),
+            customerTags: stringArray(p.customer_tags),
+            awarenessSource: p.awareness_source ? String(p.awareness_source) : null,
+            marketingConsent: p.marketing_consent === true,
+            province: p.province ? String(p.province) : null,
+            city: p.city ? String(p.city) : null,
+            branchLocalId: p.branch_local_id ? String(p.branch_local_id) : null,
+            membershipDateEpoch: optionalEpoch(p.membership_date_epoch),
+            customerSegment: String(p.customer_segment || "REGULAR"),
+            supplierCategory: p.supplier_category ? String(p.supplier_category) : null,
+            supplierSettlementMethod: p.supplier_settlement_method ? String(p.supplier_settlement_method) : null,
+            supplierPaymentDueDays: Math.max(0, Math.trunc(Number(p.supplier_payment_due_days) || 0)),
+            supplierDeliveryLeadTimeDays: Math.max(0, Math.trunc(Number(p.supplier_delivery_lead_time_days) || 0)),
+            supplierBankName: p.supplier_bank_name ? String(p.supplier_bank_name) : null,
+            supplierCardNumber: p.supplier_card_number ? String(p.supplier_card_number) : null,
+            supplierSheba: p.supplier_sheba ? String(p.supplier_sheba) : null,
+            supplierBankAccountNumber: p.supplier_bank_account_number ? String(p.supplier_bank_account_number) : null,
             version: 1,
             syncSeq: Date.now(),
           })
@@ -799,15 +930,7 @@ async function processSingleSyncEvent(params: {
           operation: "UPSERT",
           version: created.version,
           sourceDeviceId: deviceId,
-          payload: {
-            id: created.id,
-            code: created.code,
-            display_name: created.name,
-            type: created.contactType,
-            mobile: created.mobile,
-            credit_limit: created.creditLimit,
-            is_active: true,
-          },
+          payload: contactSyncPayload(created),
         });
 
         return {
@@ -829,13 +952,7 @@ async function processSingleSyncEvent(params: {
           .limit(1);
         if (!srv) throw new ApiError(404, "CONTACT_NOT_FOUND", "طرف‌حساب در سرور یافت نشد.");
 
-        const serverSnap = {
-          display_name: srv.name,
-          mobile: srv.mobile,
-          credit_limit: srv.creditLimit,
-          type: srv.contactType,
-          notes: srv.notes,
-        };
+        const serverSnap = contactSyncPayload(srv);
         const normalizedClient: Record<string, unknown> = {};
         if (p.display_name !== undefined || p.name !== undefined) {
           normalizedClient.display_name = String(p.display_name ?? p.name);
@@ -845,6 +962,35 @@ async function processSingleSyncEvent(params: {
           normalizedClient.credit_limit = String(p.credit_limit ?? p.creditLimit);
         }
         if (p.notes !== undefined) normalizedClient.notes = String(p.notes);
+        if (p.first_name !== undefined) normalizedClient.first_name = p.first_name === null ? null : String(p.first_name);
+        if (p.last_name !== undefined) normalizedClient.last_name = p.last_name === null ? null : String(p.last_name);
+        if (p.company_name !== undefined) normalizedClient.company_name = p.company_name === null ? null : String(p.company_name);
+        if (p.national_id !== undefined) normalizedClient.national_id = p.national_id === null ? null : String(p.national_id);
+        if (p.economic_code !== undefined) normalizedClient.economic_code = p.economic_code === null ? null : String(p.economic_code);
+        if (p.phone !== undefined) normalizedClient.phone = p.phone === null ? null : String(p.phone);
+        if (p.email !== undefined) normalizedClient.email = p.email === null ? null : String(p.email);
+        if (p.address !== undefined) normalizedClient.address = p.address === null ? null : String(p.address);
+        if (p.postal_code !== undefined) normalizedClient.postal_code = p.postal_code === null ? null : String(p.postal_code);
+        if (p.opening_balance !== undefined) normalizedClient.opening_balance = String(p.opening_balance);
+        if (p.is_active !== undefined) normalizedClient.is_active = Boolean(p.is_active);
+        if (p.birth_date_epoch !== undefined) normalizedClient.birth_date_epoch = optionalEpoch(p.birth_date_epoch);
+        if (p.gender !== undefined) normalizedClient.gender = String(p.gender);
+        if (p.customer_tags !== undefined) normalizedClient.customer_tags = stringArray(p.customer_tags);
+        if (p.awareness_source !== undefined) normalizedClient.awareness_source = p.awareness_source === null ? null : String(p.awareness_source);
+        if (p.marketing_consent !== undefined) normalizedClient.marketing_consent = Boolean(p.marketing_consent);
+        if (p.province !== undefined) normalizedClient.province = p.province === null ? null : String(p.province);
+        if (p.city !== undefined) normalizedClient.city = p.city === null ? null : String(p.city);
+        if (p.branch_local_id !== undefined) normalizedClient.branch_local_id = p.branch_local_id === null ? null : String(p.branch_local_id);
+        if (p.membership_date_epoch !== undefined) normalizedClient.membership_date_epoch = optionalEpoch(p.membership_date_epoch);
+        if (p.customer_segment !== undefined) normalizedClient.customer_segment = String(p.customer_segment);
+        if (p.supplier_category !== undefined) normalizedClient.supplier_category = p.supplier_category === null ? null : String(p.supplier_category);
+        if (p.supplier_settlement_method !== undefined) normalizedClient.supplier_settlement_method = p.supplier_settlement_method === null ? null : String(p.supplier_settlement_method);
+        if (p.supplier_payment_due_days !== undefined) normalizedClient.supplier_payment_due_days = Math.max(0, Math.trunc(Number(p.supplier_payment_due_days) || 0));
+        if (p.supplier_delivery_lead_time_days !== undefined) normalizedClient.supplier_delivery_lead_time_days = Math.max(0, Math.trunc(Number(p.supplier_delivery_lead_time_days) || 0));
+        if (p.supplier_bank_name !== undefined) normalizedClient.supplier_bank_name = p.supplier_bank_name === null ? null : String(p.supplier_bank_name);
+        if (p.supplier_card_number !== undefined) normalizedClient.supplier_card_number = p.supplier_card_number === null ? null : String(p.supplier_card_number);
+        if (p.supplier_sheba !== undefined) normalizedClient.supplier_sheba = p.supplier_sheba === null ? null : String(p.supplier_sheba);
+        if (p.supplier_bank_account_number !== undefined) normalizedClient.supplier_bank_account_number = p.supplier_bank_account_number === null ? null : String(p.supplier_bank_account_number);
 
         const baseVer = ev.base_version ?? 0;
         if (srv.version > baseVer) {
@@ -890,6 +1036,35 @@ async function processSingleSyncEvent(params: {
             ...(normalizedClient.mobile !== undefined ? { mobile: String(normalizedClient.mobile) } : {}),
             ...(normalizedClient.credit_limit ? { creditLimit: String(normalizedClient.credit_limit) } : {}),
             ...(normalizedClient.notes !== undefined ? { notes: String(normalizedClient.notes) } : {}),
+            ...(normalizedClient.first_name !== undefined ? { firstName: normalizedClient.first_name as string | null } : {}),
+            ...(normalizedClient.last_name !== undefined ? { lastName: normalizedClient.last_name as string | null } : {}),
+            ...(normalizedClient.company_name !== undefined ? { companyName: normalizedClient.company_name as string | null } : {}),
+            ...(normalizedClient.national_id !== undefined ? { nationalCode: normalizedClient.national_id as string | null } : {}),
+            ...(normalizedClient.economic_code !== undefined ? { economicCode: normalizedClient.economic_code as string | null } : {}),
+            ...(normalizedClient.phone !== undefined ? { phone: normalizedClient.phone as string | null } : {}),
+            ...(normalizedClient.email !== undefined ? { email: normalizedClient.email as string | null } : {}),
+            ...(normalizedClient.address !== undefined ? { address: normalizedClient.address as string | null } : {}),
+            ...(normalizedClient.postal_code !== undefined ? { postalCode: normalizedClient.postal_code as string | null } : {}),
+            ...(normalizedClient.opening_balance !== undefined ? { openingBalance: String(normalizedClient.opening_balance) } : {}),
+            ...(normalizedClient.is_active !== undefined ? { status: normalizedClient.is_active ? "ACTIVE" : "INACTIVE" } : {}),
+            ...(normalizedClient.birth_date_epoch !== undefined ? { birthDateEpoch: normalizedClient.birth_date_epoch as number | null } : {}),
+            ...(normalizedClient.gender !== undefined ? { gender: String(normalizedClient.gender) } : {}),
+            ...(normalizedClient.customer_tags !== undefined ? { customerTags: normalizedClient.customer_tags as string[] } : {}),
+            ...(normalizedClient.awareness_source !== undefined ? { awarenessSource: normalizedClient.awareness_source as string | null } : {}),
+            ...(normalizedClient.marketing_consent !== undefined ? { marketingConsent: Boolean(normalizedClient.marketing_consent) } : {}),
+            ...(normalizedClient.province !== undefined ? { province: normalizedClient.province as string | null } : {}),
+            ...(normalizedClient.city !== undefined ? { city: normalizedClient.city as string | null } : {}),
+            ...(normalizedClient.branch_local_id !== undefined ? { branchLocalId: normalizedClient.branch_local_id as string | null } : {}),
+            ...(normalizedClient.membership_date_epoch !== undefined ? { membershipDateEpoch: normalizedClient.membership_date_epoch as number | null } : {}),
+            ...(normalizedClient.customer_segment !== undefined ? { customerSegment: String(normalizedClient.customer_segment) } : {}),
+            ...(normalizedClient.supplier_category !== undefined ? { supplierCategory: normalizedClient.supplier_category as string | null } : {}),
+            ...(normalizedClient.supplier_settlement_method !== undefined ? { supplierSettlementMethod: normalizedClient.supplier_settlement_method as string | null } : {}),
+            ...(normalizedClient.supplier_payment_due_days !== undefined ? { supplierPaymentDueDays: Number(normalizedClient.supplier_payment_due_days) } : {}),
+            ...(normalizedClient.supplier_delivery_lead_time_days !== undefined ? { supplierDeliveryLeadTimeDays: Number(normalizedClient.supplier_delivery_lead_time_days) } : {}),
+            ...(normalizedClient.supplier_bank_name !== undefined ? { supplierBankName: normalizedClient.supplier_bank_name as string | null } : {}),
+            ...(normalizedClient.supplier_card_number !== undefined ? { supplierCardNumber: normalizedClient.supplier_card_number as string | null } : {}),
+            ...(normalizedClient.supplier_sheba !== undefined ? { supplierSheba: normalizedClient.supplier_sheba as string | null } : {}),
+            ...(normalizedClient.supplier_bank_account_number !== undefined ? { supplierBankAccountNumber: normalizedClient.supplier_bank_account_number as string | null } : {}),
             version: srv.version + 1,
             syncSeq: Date.now(),
             updatedAt: new Date(),
@@ -904,15 +1079,7 @@ async function processSingleSyncEvent(params: {
           operation: "UPSERT",
           version: updated.version,
           sourceDeviceId: deviceId,
-          payload: {
-            id: updated.id,
-            code: updated.code,
-            display_name: updated.name,
-            type: updated.contactType,
-            mobile: updated.mobile,
-            credit_limit: updated.creditLimit,
-            is_active: !updated.deletedAt,
-          },
+          payload: contactSyncPayload(updated),
         });
 
         return {
@@ -969,6 +1136,217 @@ async function processSingleSyncEvent(params: {
       }
 
       throw new ApiError(422, "UNSUPPORTED_OPERATION", `عملیات ${operation} برای contact پشتیبانی نمی‌شود.`);
+    });
+  }
+
+  if (entityType === "loyalty_transaction" && operation === "CREATE") {
+    return withTenantTransaction(organizationId, async (tx) => {
+      const contactId = isUuid(p.contact_id) ? String(p.contact_id) : "";
+      const txType = String(p.tx_type || "").toUpperCase();
+      const pointsDelta = Number(p.points_delta);
+      const allowedTypes = new Set(["EARN", "REDEEM", "ADJUST", "EXPIRE", "REFERRAL"]);
+      if (!contactId || !allowedTypes.has(txType) || !Number.isSafeInteger(pointsDelta) || pointsDelta === 0) {
+        throw new ApiError(422, "LOYALTY_TRANSACTION_INVALID", "نوع تراکنش و تعداد صحیح امتیاز معتبر نیست.");
+      }
+      if ((txType === "REDEEM" || txType === "EXPIRE") && pointsDelta > 0) {
+        throw new ApiError(422, "LOYALTY_TRANSACTION_INVALID", "مصرف یا انقضای امتیاز باید از موجودی کم کند.");
+      }
+      if ((txType === "EARN" || txType === "REFERRAL") && pointsDelta < 0) {
+        throw new ApiError(422, "LOYALTY_TRANSACTION_INVALID", "کسب امتیاز باید به موجودی اضافه کند.");
+      }
+
+      const [contact] = await tx
+        .select()
+        .from(contacts)
+        .where(and(eq(contacts.id, contactId), eq(contacts.organizationId, organizationId)))
+        .limit(1);
+      if (!contact || !["CUSTOMER", "BOTH"].includes(contact.contactType)) {
+        throw new ApiError(404, "LOYALTY_CUSTOMER_NOT_FOUND", "مشتری در این سازمان یافت نشد.");
+      }
+
+      const [duplicate] = await tx
+        .select()
+        .from(loyaltyTransactions)
+        .where(and(eq(loyaltyTransactions.id, clientUuid), eq(loyaltyTransactions.organizationId, organizationId)))
+        .limit(1);
+      if (duplicate) {
+        return { event_id: ev.event_id, entity_id: duplicate.id, server_id: duplicate.id, status: "ACCEPTED", entity_version: 1, business_status: "CONFIRMED", error: null };
+      }
+
+      let [account] = await tx
+        .select()
+        .from(loyaltyAccounts)
+        .where(and(eq(loyaltyAccounts.organizationId, organizationId), eq(loyaltyAccounts.contactId, contactId)))
+        .limit(1);
+      if (!account) {
+        [account] = await tx
+          .insert(loyaltyAccounts)
+          .values({ organizationId, contactId, tier: "BRONZE" })
+          .returning();
+      }
+
+      const history = await tx
+        .select({ pointsDelta: loyaltyTransactions.pointsDelta })
+        .from(loyaltyTransactions)
+        .where(and(eq(loyaltyTransactions.organizationId, organizationId), eq(loyaltyTransactions.contactId, contactId)));
+      const currentBalance = history.reduce((sum, row) => sum + row.pointsDelta, 0);
+      if (currentBalance + pointsDelta < 0) {
+        throw new ApiError(422, "INSUFFICIENT_LOYALTY_POINTS", `امتیاز کافی نیست (موجود: ${currentBalance}).`);
+      }
+
+      const createdAtEpoch = optionalEpoch(p.created_at_epoch);
+      const createdAt = createdAtEpoch ? new Date(createdAtEpoch) : new Date();
+      const [saved] = await tx
+        .insert(loyaltyTransactions)
+        .values({
+          id: clientUuid,
+          organizationId,
+          loyaltyAccountId: account.id,
+          contactId,
+          txType,
+          pointsDelta,
+          referenceType: isUuid(p.reference_id) ? "DOCUMENT" : null,
+          referenceId: isUuid(p.reference_id) ? String(p.reference_id) : null,
+          description: String(p.description || "").slice(0, 2000),
+          createdBy: userId,
+          createdAt,
+        })
+        .returning();
+
+      const nextBalance = currentBalance + pointsDelta;
+      const [configuredTier] = await tx
+        .select()
+        .from(loyaltyMembershipTiers)
+        .where(and(eq(loyaltyMembershipTiers.organizationId, organizationId), eq(loyaltyMembershipTiers.isActive, true)))
+        .orderBy(desc(loyaltyMembershipTiers.minimumPoints));
+      const tiers = await tx
+        .select()
+        .from(loyaltyMembershipTiers)
+        .where(and(eq(loyaltyMembershipTiers.organizationId, organizationId), eq(loyaltyMembershipTiers.isActive, true)));
+      const matchedTier = tiers
+        .filter((tier) => !tier.deletedAt && Number(tier.minimumPoints) <= nextBalance)
+        .sort((a, b) => Number(b.minimumPoints) - Number(a.minimumPoints))[0];
+      const fallbackTier = configuredTier && Number(configuredTier.minimumPoints) <= nextBalance
+        ? configuredTier.name
+        : nextBalance >= 1000 ? "GOLD" : nextBalance >= 300 ? "SILVER" : "BRONZE";
+      await tx.update(loyaltyAccounts).set({ tier: (matchedTier?.name ?? fallbackTier).slice(0, 24) }).where(eq(loyaltyAccounts.id, account.id));
+
+      await appendSyncChangeLog(tx, {
+        organizationId,
+        entityType: "loyalty_transaction",
+        entityId: saved.id,
+        operation: "UPSERT",
+        version: 1,
+        sourceDeviceId: deviceId,
+        payload: {
+          id: saved.id,
+          organization_id: organizationId,
+          contact_id: contactId,
+          tx_type: saved.txType,
+          points_delta: saved.pointsDelta,
+          reference_id: saved.referenceId,
+          description: saved.description,
+          created_at_epoch: saved.createdAt.getTime(),
+        },
+      });
+      return { event_id: ev.event_id, entity_id: saved.id, server_id: saved.id, status: "ACCEPTED", entity_version: 1, business_status: "CONFIRMED", error: null };
+    });
+  }
+
+  if (entityType === "loyalty_tier") {
+    return withTenantTransaction(organizationId, async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(loyaltyMembershipTiers)
+        .where(and(eq(loyaltyMembershipTiers.id, clientUuid), eq(loyaltyMembershipTiers.organizationId, organizationId)))
+        .limit(1);
+      const now = new Date();
+      if (operation === "DELETE") {
+        if (!existing) throw new ApiError(404, "LOYALTY_TIER_NOT_FOUND", "سطح عضویت در سرور یافت نشد.");
+        const [deleted] = await tx
+          .update(loyaltyMembershipTiers)
+          .set({ isActive: false, deletedAt: now, version: existing.version + 1, syncSeq: Date.now(), updatedAt: now })
+          .where(eq(loyaltyMembershipTiers.id, existing.id))
+          .returning();
+        await appendSyncChangeLog(tx, {
+          organizationId,
+          entityType: "loyalty_tier",
+          entityId: deleted.id,
+          operation: "TOMBSTONE",
+          version: deleted.version,
+          sourceDeviceId: deviceId,
+          payload: { id: deleted.id, is_deleted: true },
+        });
+        return { event_id: ev.event_id, entity_id: deleted.id, server_id: deleted.id, status: "ACCEPTED", entity_version: deleted.version, business_status: "CANCELLED", error: null };
+      }
+
+      if (operation !== "CREATE" && operation !== "UPDATE") {
+        throw new ApiError(422, "UNSUPPORTED_OPERATION", `عملیات ${operation} برای loyalty_tier پشتیبانی نمی‌شود.`);
+      }
+      const name = String(p.name || "").trim();
+      const minimumPoints = String(p.minimum_points ?? "0");
+      if (name.length < 2 || name.length > 80 || !Number.isFinite(Number(minimumPoints)) || Number(minimumPoints) < 0) {
+        throw new ApiError(422, "VALIDATION_ERROR", "نام سطح عضویت و حداقل امتیاز معتبر نیست.");
+      }
+      const colorHex = String(p.color_hex || "#78909C");
+      if (!/^#[0-9a-fA-F]{6}$/.test(colorHex)) throw new ApiError(422, "VALIDATION_ERROR", "رنگ سطح عضویت معتبر نیست.");
+      if (operation === "UPDATE" && !existing) throw new ApiError(404, "LOYALTY_TIER_NOT_FOUND", "سطح عضویت جهت ویرایش یافت نشد.");
+
+      const values = {
+        name,
+        minimumPoints,
+        colorHex,
+        isActive: p.is_active !== false,
+        deletedAt: null,
+        version: (existing?.version ?? 0) + 1,
+        syncSeq: Date.now(),
+        updatedAt: now,
+      };
+      const [saved] = existing
+        ? await tx.update(loyaltyMembershipTiers).set(values).where(eq(loyaltyMembershipTiers.id, existing.id)).returning()
+        : await tx.insert(loyaltyMembershipTiers).values({ id: clientUuid, organizationId, ...values }).returning();
+      await appendSyncChangeLog(tx, {
+        organizationId,
+        entityType: "loyalty_tier",
+        entityId: saved.id,
+        operation: "UPSERT",
+        version: saved.version,
+        sourceDeviceId: deviceId,
+        payload: { id: saved.id, organization_id: organizationId, name: saved.name, minimum_points: saved.minimumPoints, color_hex: saved.colorHex, is_active: saved.isActive },
+      });
+      return { event_id: ev.event_id, entity_id: saved.id, server_id: saved.id, status: "ACCEPTED", entity_version: saved.version, business_status: "CONFIRMED", error: null };
+    });
+  }
+
+  if (entityType === "loyalty_program_settings") {
+    return withTenantTransaction(organizationId, async (tx) => {
+      if (operation !== "CREATE" && operation !== "UPDATE") {
+        throw new ApiError(422, "UNSUPPORTED_OPERATION", `عملیات ${operation} برای تنظیمات باشگاه مشتریان پشتیبانی نمی‌شود.`);
+      }
+      const amount = String(p.purchase_amount_per_point ?? "1000000");
+      if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+        throw new ApiError(422, "VALIDATION_ERROR", "مبلغ لازم برای کسب یک امتیاز باید بیشتر از صفر باشد.");
+      }
+      const [existing] = await tx
+        .select()
+        .from(loyaltyProgramSettings)
+        .where(eq(loyaltyProgramSettings.organizationId, organizationId))
+        .limit(1);
+      const now = new Date();
+      const values = { purchaseAmountPerPoint: amount, version: (existing?.version ?? 0) + 1, syncSeq: Date.now(), updatedAt: now };
+      const [saved] = existing
+        ? await tx.update(loyaltyProgramSettings).set(values).where(eq(loyaltyProgramSettings.id, existing.id)).returning()
+        : await tx.insert(loyaltyProgramSettings).values({ id: clientUuid, organizationId, ...values }).returning();
+      await appendSyncChangeLog(tx, {
+        organizationId,
+        entityType: "loyalty_program_settings",
+        entityId: saved.id,
+        operation: "UPSERT",
+        version: saved.version,
+        sourceDeviceId: deviceId,
+        payload: { id: saved.id, organization_id: organizationId, purchase_amount_per_point: saved.purchaseAmountPerPoint },
+      });
+      return { event_id: ev.event_id, entity_id: saved.id, server_id: saved.id, status: "ACCEPTED", entity_version: saved.version, business_status: "CONFIRMED", error: null };
     });
   }
 
@@ -1715,6 +2093,44 @@ async function processSingleSyncEvent(params: {
       throw new ApiError(422, "VALIDATION_ERROR", "اطلاعات سند انبار آفلاین (warehouse_id, items) ناقص است.");
     }
 
+    if (documentType === "RECEIPT" && p.supplier_id && p.supplier_invoice_number) {
+      const landedReceipt = await createLandedWarehouseReceipt({
+        organizationId,
+        warehouseId,
+        documentId: clientUuid,
+        supplierId: String(p.supplier_id),
+        supplierInvoiceNumber: String(p.supplier_invoice_number),
+        invoiceDate: String(p.invoice_date || documentDate),
+        invoiceDateJalali: p.invoice_date_jalali == null ? undefined : String(p.invoice_date_jalali),
+        shippingCost: String(p.shipping_cost || "0.00"),
+        customsAndExtraCost: String(p.customs_and_extra_cost || "0.00"),
+        supplierDiscount: String(p.supplier_discount || "0.00"),
+        taxAmount: String(p.tax_amount || "0.00"),
+        paidAmount: String(p.paid_amount || "0.00"),
+        paymentBankAccountId: p.payment_bank_account_id ? String(p.payment_bank_account_id) : null,
+        paymentTrackingNumber: p.payment_tracking_number == null ? null : String(p.payment_tracking_number),
+        description: reason,
+        actorUserId: params.userId,
+        actorEmail: params.userEmail,
+        ipAddress: params.ipAddress,
+        items: items.map((item) => ({
+          product_id: item.product_id,
+          variant_id: item.variant_id ?? null,
+          quantity: item.quantity,
+          unit_price: String((item as { unit_price?: string }).unit_price || item.unit_cost || "0.00"),
+        })),
+      });
+      return {
+        event_id: ev.event_id,
+        entity_id: clientUuid,
+        server_id: landedReceipt.document.id,
+        status: "CONFIRMED",
+        entity_version: 1,
+        business_status: "POSTED",
+        error: null,
+      };
+    }
+
     if (documentType === "RECEIPT" || documentType === "ISSUE") {
       const posted = await withTenantTransaction(organizationId, (tx) =>
         postStockDocumentTx(tx, {
@@ -1838,21 +2254,29 @@ async function processSingleSyncEvent(params: {
           id: clientUuid,
           organizationId,
           contactId: isUuid(p.contact_id) ? p.contact_id : null,
-          chequeType: String(p.direction || "RECEIVABLE"),
+          chequeType: normalizeChequeDirection(p.direction),
           sayadId: String(p.cheque_number || `404${Date.now().toString().slice(-13)}`),
           serialNumber: String(p.serial_number || "0001"),
           bankName: String(p.bank_name || "بانک ملت"),
+          branchName: p.branch_name ? String(p.branch_name) : null,
+          accountNumber: p.account_number ? String(p.account_number) : null,
           amount: String(p.amount || "0.00"),
-          issueDate: String(p.issue_date || new Date().toISOString().slice(0, 10)),
-          dueDate: String(p.due_date || new Date().toISOString().slice(0, 10)),
-          status: "RECEIVED",
+          issueDate: syncDate(p.issue_date, new Date().toISOString().slice(0, 10)),
+          dueDate: syncDate(p.due_date, new Date().toISOString().slice(0, 10)),
+          financialAccountId: isUuid(p.financial_account_id || p.treasury_account_local_id) ? String(p.financial_account_id || p.treasury_account_local_id) : null,
+          relatedDocumentType: p.related_document_type ? String(p.related_document_type) : null,
+          relatedDocumentId: isUuid(p.related_document_id || p.related_document_local_id) ? String(p.related_document_id || p.related_document_local_id) : null,
+          referenceDocumentNumber: p.reference_document_number ? String(p.reference_document_number) : null,
+          reminderDateEpoch: optionalEpoch(p.reminder_date_epoch ?? p.reminder_date),
+          notes: p.notes ? String(p.notes) : null,
+          status: normalizeChequeStatus(p.status),
         })
         .returning();
       await tx.insert(chequeEvents).values({
         organizationId,
         chequeId: ch.id,
         fromStatus: null,
-        toStatus: "RECEIVED",
+        toStatus: ch.status,
         eventDate: ch.issueDate,
         note: "ثبت چک در حالت آفلاین اندروید",
         actorUserId: params.userId,
@@ -1864,7 +2288,7 @@ async function processSingleSyncEvent(params: {
         operation: "UPSERT",
         version: 1,
         sourceDeviceId: deviceId,
-        payload: { id: ch.id, cheque_number: ch.sayadId, amount: ch.amount, status: ch.status },
+        payload: { ...chequeSyncPayload(ch), contact_name: p.contact_name ? String(p.contact_name) : null },
       });
       return {
         event_id: ev.event_id,
@@ -1872,7 +2296,55 @@ async function processSingleSyncEvent(params: {
         server_id: ch.id,
         status: "ACCEPTED",
         entity_version: 1,
-        business_status: "RECEIVED",
+        business_status: ch.status,
+        error: null,
+      };
+    });
+  }
+
+  if (entityType === "cheque" && operation === "UPDATE") {
+    return withTenantTransaction(organizationId, async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(cheques)
+        .where(and(eq(cheques.id, clientUuid), eq(cheques.organizationId, organizationId)))
+        .limit(1);
+      if (!current) throw new ApiError(404, "CHEQUE_NOT_FOUND", "چک در سرور یافت نشد.");
+
+      const nextStatus = normalizeChequeStatus(p.status);
+      if (!nextStatus || nextStatus === current.status) {
+        return { event_id: ev.event_id, entity_id: current.id, server_id: current.id, status: "ACCEPTED", entity_version: current.version, business_status: current.status, error: null };
+      }
+      const [updated] = await tx
+        .update(cheques)
+        .set({ status: nextStatus, version: current.version + 1, updatedAt: new Date() })
+        .where(eq(cheques.id, current.id))
+        .returning();
+      await tx.insert(chequeEvents).values({
+        organizationId,
+        chequeId: current.id,
+        fromStatus: current.status,
+        toStatus: nextStatus,
+        eventDate: new Date().toISOString().slice(0, 10),
+        note: "تغییر وضعیت چک از برنامه اندروید",
+        actorUserId: params.userId,
+      });
+      await appendSyncChangeLog(tx, {
+        organizationId,
+        entityType: "cheque",
+        entityId: updated.id,
+        operation: "UPSERT",
+        version: updated.version,
+        sourceDeviceId: deviceId,
+        payload: chequeSyncPayload(updated),
+      });
+      return {
+        event_id: ev.event_id,
+        entity_id: current.id,
+        server_id: current.id,
+        status: "ACCEPTED",
+        entity_version: updated.version,
+        business_status: updated.status,
         error: null,
       };
     });
@@ -1970,23 +2442,7 @@ export async function pullSyncDelta(params: {
     );
   }
 
-  const [device] = await db
-    .select()
-    .from(devices)
-    .where(
-      and(
-        eq(devices.id, params.deviceId),
-        eq(devices.organizationId, params.organizationId)
-      )
-    )
-    .limit(1);
-
-  if (!device) {
-    throw new ApiError(403, "DEVICE_NOT_REGISTERED", "دستگاه متعلق به این سازمان نیست.");
-  }
-  if (device.status !== "ACTIVE") {
-    throw new ApiError(403, "DEVICE_REVOKED", "دستگاه ابطال شده است و مجاز به دریافت تغییرات نیست.");
-  }
+  const device = await resolveActiveSyncDevice(params.organizationId, params.deviceId);
 
   await ensureOrgChangeLogBaseline(params.organizationId);
 
@@ -2060,12 +2516,13 @@ export async function acknowledgeSyncCursor(params: {
 }) {
   const seq = decodeSyncCursor(params.cursor, params.organizationId);
   const now = new Date();
+  const device = await resolveActiveSyncDevice(params.organizationId, params.deviceId);
 
   const [cp] = await db
     .insert(syncCheckpoints)
     .values({
       organizationId: params.organizationId,
-      deviceId: params.deviceId,
+      deviceId: device.id,
       checkpointSeq: seq,
       cursor: params.cursor,
       acknowledgedAt: now,
@@ -2085,11 +2542,11 @@ export async function acknowledgeSyncCursor(params: {
   await db
     .update(devices)
     .set({ lastCheckpoint: seq, lastSyncAt: now, updatedAt: now })
-    .where(and(eq(devices.id, params.deviceId), eq(devices.organizationId, params.organizationId)));
+    .where(and(eq(devices.id, device.id), eq(devices.organizationId, params.organizationId)));
 
   return {
     acknowledged: true,
-    device_id: params.deviceId,
+    device_id: device.id,
     checkpoint_seq: cp.checkpointSeq,
     cursor: cp.cursor,
     acknowledged_at: now.toISOString(),
@@ -2109,12 +2566,13 @@ export async function resetSyncCheckpoint(params: {
 }) {
   const zeroCursor = encodeSyncCursor({ seq: 0, orgId: params.organizationId });
   const now = new Date();
+  const device = await resolveActiveSyncDevice(params.organizationId, params.deviceId);
 
   await db
     .insert(syncCheckpoints)
     .values({
       organizationId: params.organizationId,
-      deviceId: params.deviceId,
+      deviceId: device.id,
       checkpointSeq: 0,
       cursor: zeroCursor,
       updatedAt: now,
@@ -2127,7 +2585,7 @@ export async function resetSyncCheckpoint(params: {
   await db
     .update(devices)
     .set({ lastCheckpoint: 0, updatedAt: now })
-    .where(and(eq(devices.id, params.deviceId), eq(devices.organizationId, params.organizationId)));
+    .where(and(eq(devices.id, device.id), eq(devices.organizationId, params.organizationId)));
 
   await recordAuditLog({
     organizationId: params.organizationId,
@@ -2136,14 +2594,14 @@ export async function resetSyncCheckpoint(params: {
     scope: "ORGANIZATION",
     action: "SYNC_CHECKPOINT_RESET",
     entityType: "SYNC_CHECKPOINT",
-    entityId: params.deviceId,
+    entityId: device.id,
     ipAddress: params.ipAddress,
     metadata: { reason: params.reason ?? "Cursor recovery requested", localDataPreserved: true },
   });
 
   return {
     reset: true,
-    device_id: params.deviceId,
+    device_id: device.id,
     new_cursor: zeroCursor,
     data_deleted: false,
   };

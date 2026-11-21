@@ -14,6 +14,7 @@ import {
   financialAccounts,
   invoicePaymentAllocations,
   loyaltyAccounts,
+  loyaltyMembershipTiers,
   loyaltyTransactions,
   organizationMembers,
   products,
@@ -865,7 +866,7 @@ export async function handleQuotationsCrmEmployeesRoutes(
   if (root === "crm") {
     if (method === "GET" && seg1 === "customers") {
       const ctx = await requireOrgContext(req, "contacts.view");
-      const [allContacts, allSales, allReturns, allContactTxs, allLoyaltyAccs, allLoyaltyTxs] =
+      const [allContacts, allSales, allReturns, allContactTxs, allLoyaltyAccs, allLoyaltyTxs, allLoyaltyTiers] =
         await Promise.all([
           db.select().from(contacts).where(eq(contacts.organizationId, ctx.organizationId)),
           db.select().from(salesInvoices).where(eq(salesInvoices.organizationId, ctx.organizationId)),
@@ -873,6 +874,7 @@ export async function handleQuotationsCrmEmployeesRoutes(
           db.select().from(contactTransactions).where(eq(contactTransactions.organizationId, ctx.organizationId)),
           db.select().from(loyaltyAccounts).where(eq(loyaltyAccounts.organizationId, ctx.organizationId)),
           db.select().from(loyaltyTransactions).where(eq(loyaltyTransactions.organizationId, ctx.organizationId)).orderBy(desc(loyaltyTransactions.createdAt)),
+          db.select().from(loyaltyMembershipTiers).where(eq(loyaltyMembershipTiers.organizationId, ctx.organizationId)),
         ]);
 
       const profiles = allContacts.map((c) => {
@@ -894,6 +896,9 @@ export async function handleQuotationsCrmEmployeesRoutes(
         const la = allLoyaltyAccs.find((x) => x.contactId === c.id);
         const lTxs = allLoyaltyTxs.filter((x) => x.contactId === c.id);
         const pointsBalance = lTxs.reduce((sum, x) => sum + x.pointsDelta, 0);
+        const configuredTier = allLoyaltyTiers
+          .filter((tier) => tier.isActive && !tier.deletedAt && Number(tier.minimumPoints) <= pointsBalance)
+          .sort((a, b) => Number(b.minimumPoints) - Number(a.minimumPoints))[0];
 
         const segmentsList: string[] = [];
         if (pointsBalance >= 500 || Number(formatDecimal(totalPurchases, 2)) >= 300_000_000) segmentsList.push("VIP");
@@ -909,15 +914,32 @@ export async function handleQuotationsCrmEmployeesRoutes(
           contact_id: c.id,
           code: c.code,
           display_name: c.name,
+          first_name: c.firstName,
+          last_name: c.lastName,
+          company_name: c.companyName,
           type: c.contactType,
           mobile: c.mobile,
+          phone: c.phone,
+          email: c.email,
+          address: c.address,
+          postal_code: c.postalCode,
+          gender: c.gender,
+          birth_date_epoch: c.birthDateEpoch,
+          customer_tags: c.customerTags,
+          awareness_source: c.awarenessSource,
+          marketing_consent: c.marketingConsent,
+          province: c.province,
+          city: c.city,
+          branch_local_id: c.branchLocalId,
+          membership_date_epoch: c.membershipDateEpoch,
+          customer_segment: c.customerSegment,
           credit_limit: c.creditLimit,
           over_credit_limit: overCredit,
           invoices_count: cSales.length,
           total_purchases: formatDecimal(totalPurchases, 2),
           total_returns: formatDecimal(totalReturns, 2),
           outstanding_receivable: formatDecimal(outstanding, 2),
-          loyalty_tier: la?.tier ?? "BRONZE",
+          loyalty_tier: configuredTier?.name ?? la?.tier ?? "عضو عادی",
           loyalty_points: pointsBalance,
           segments: segmentsList,
           recent_loyalty_transactions: lTxs.slice(0, 10),

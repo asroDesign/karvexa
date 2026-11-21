@@ -5,11 +5,14 @@ import {
   accountingCategories,
   accountingPolicies,
   accounts,
+  bankReconciliations,
   branches,
   categoryAccountMappings,
   contacts,
   employees,
   financialAccounts,
+  financialTransactions,
+  journalEntryLines,
   loyaltyAccounts,
   loyaltyTransactions,
   organizations,
@@ -150,6 +153,88 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
     .select()
     .from(financialAccounts)
     .where(eq(financialAccounts.organizationId, organizationId));
+
+  // These values were mistakenly shipped as sample balances. Remove them only
+  // when they still exactly match the seed and have no transactions, reconciliation,
+  // or accounting lines, so existing user activity is never overwritten.
+  const seededOpeningBalances = [
+    { name: "صندوق نقدی فروشگاه", accountType: "CASHBOX", balance: "50000000.00" },
+    { name: "حساب بانکی اصلی", accountType: "BANK", balance: "150000000.00" },
+  ] as const;
+  for (const seededBalance of seededOpeningBalances) {
+    const account = finAccs.find(
+      (row) => row.name === seededBalance.name && row.accountType === seededBalance.accountType
+    );
+    if (!account) continue;
+
+    await db.transaction(async (tx) => {
+      const [lockedAccount] = await tx
+        .select()
+        .from(financialAccounts)
+        .where(and(
+          eq(financialAccounts.id, account.id),
+          eq(financialAccounts.organizationId, organizationId),
+        ))
+        .for("update");
+      if (
+        !lockedAccount ||
+        lockedAccount.name !== seededBalance.name ||
+        lockedAccount.accountType !== seededBalance.accountType ||
+        lockedAccount.openingBalance !== "0.00" ||
+        lockedAccount.balance !== seededBalance.balance
+      ) return;
+
+      // Lock the linked ledger account too so a concurrent journal line cannot
+      // appear between the activity check and the correction.
+      if (lockedAccount.accountId) {
+        await tx
+          .select({ id: accounts.id })
+          .from(accounts)
+          .where(eq(accounts.id, lockedAccount.accountId))
+          .for("update");
+      }
+
+      const [transaction] = await tx
+        .select({ id: financialTransactions.id })
+        .from(financialTransactions)
+        .where(and(
+          eq(financialTransactions.organizationId, organizationId),
+          eq(financialTransactions.financialAccountId, lockedAccount.id),
+        ))
+        .limit(1);
+      const [reconciliation] = await tx
+        .select({ id: bankReconciliations.id })
+        .from(bankReconciliations)
+        .where(and(
+          eq(bankReconciliations.organizationId, organizationId),
+          eq(bankReconciliations.financialAccountId, lockedAccount.id),
+        ))
+        .limit(1);
+      const [journalLine] = lockedAccount.accountId
+        ? await tx
+            .select({ id: journalEntryLines.id })
+            .from(journalEntryLines)
+            .where(and(
+              eq(journalEntryLines.organizationId, organizationId),
+              eq(journalEntryLines.accountId, lockedAccount.accountId),
+            ))
+            .limit(1)
+        : [undefined];
+
+      if (!transaction && !reconciliation && !journalLine) {
+        await tx
+          .update(financialAccounts)
+          .set({ balance: "0.00", openingBalance: "0.00", version: lockedAccount.version + 1, updatedAt: new Date() })
+          .where(and(
+            eq(financialAccounts.id, lockedAccount.id),
+            eq(financialAccounts.organizationId, organizationId),
+            eq(financialAccounts.balance, seededBalance.balance),
+            eq(financialAccounts.openingBalance, "0.00"),
+          ));
+      }
+    });
+  }
+
   if (finAccs.length === 0 && accByRole.get("CASH") && accByRole.get("BANK")) {
     await db.insert(financialAccounts).values([
       {
@@ -157,7 +242,8 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
         accountId: accByRole.get("CASH")!.id,
         name: "صندوق نقدی فروشگاه",
         accountType: "CASHBOX",
-        balance: "50000000.00",
+        openingBalance: "0.00",
+        balance: "0.00",
       },
       {
         organizationId,
@@ -165,7 +251,8 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
         name: "حساب بانکی اصلی",
         accountType: "BANK",
         bankName: "بانک ملت",
-        balance: "150000000.00",
+        openingBalance: "0.00",
+        balance: "0.00",
       },
       {
         organizationId,
@@ -173,6 +260,7 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
         name: "دستگاه کارت‌خوان (POS) فروشگاهی",
         accountType: "POS",
         bankName: "به‌پرداخت ملت",
+        openingBalance: "0.00",
         balance: "0.00",
       },
     ]);
@@ -183,6 +271,7 @@ export async function ensurePrompt05OrgDefaults(organizationId: string) {
       name: "دستگاه کارت‌خوان (POS) فروشگاهی",
       accountType: "POS",
       bankName: "به‌پرداخت ملت",
+      openingBalance: "0.00",
       balance: "0.00",
     });
   }

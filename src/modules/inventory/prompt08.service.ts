@@ -43,6 +43,7 @@ import { getLiveStockBalances, postStockDocumentTx } from "./service";
 export async function createLandedWarehouseReceipt(params: {
   organizationId: string;
   warehouseId: string;
+  documentId?: string;
   supplierId: string;
   supplierInvoiceNumber: string;
   invoiceDate?: string;
@@ -50,7 +51,9 @@ export async function createLandedWarehouseReceipt(params: {
   shippingCost: string;
   customsAndExtraCost: string;
   supplierDiscount: string;
+  taxAmount: string;
   paymentBankAccountId?: string | null;
+  paymentTrackingNumber?: string | null;
   paidAmount: string;
   attachmentUrl?: string | null;
   description?: string;
@@ -72,10 +75,11 @@ export async function createLandedWarehouseReceipt(params: {
   const shippingDec = parseDecimal(params.shippingCost || "0");
   const customsDec = parseDecimal(params.customsAndExtraCost || "0");
   const discountDec = parseDecimal(params.supplierDiscount || "0");
+  const taxDec = parseDecimal(params.taxAmount || "0");
   const paidDec = parseDecimal(params.paidAmount || "0");
 
-  if (isNegativeDec(shippingDec) || isNegativeDec(customsDec) || isNegativeDec(discountDec) || isNegativeDec(paidDec)) {
-    throw new ApiError(422, "NEGATIVE_AMOUNT_NOT_ALLOWED", "مبالغ حمل، گمرک، تخفیف و پرداختی نمی‌توانند منفی باشند.");
+  if (isNegativeDec(shippingDec) || isNegativeDec(customsDec) || isNegativeDec(discountDec) || isNegativeDec(taxDec) || isNegativeDec(paidDec)) {
+    throw new ApiError(422, "NEGATIVE_AMOUNT_NOT_ALLOWED", "مبالغ حمل، گمرک، تخفیف، مالیات و پرداختی نمی‌توانند منفی باشند.");
   }
 
   let grossItemsTotal = BigInt(0);
@@ -100,14 +104,18 @@ export async function createLandedWarehouseReceipt(params: {
   if (isNegativeDec(netAcquisitionDec)) {
     throw new ApiError(422, "DISCOUNT_EXCEEDS_COST", "تخفیف تأمین‌کننده نمی‌تواند بیشتر از بهای کل کالاها باشد.");
   }
-  if (gtDec(paidDec, netAcquisitionDec)) {
+  const invoiceTotalDec = addDec(netAcquisitionDec, taxDec);
+  if (!isPositiveDec(invoiceTotalDec)) {
+    throw new ApiError(422, "RECEIPT_TOTAL_ZERO", "جمع نهایی فاکتور پس از تخفیف باید بزرگ‌تر از صفر باشد.");
+  }
+  if (gtDec(paidDec, invoiceTotalDec)) {
     throw new ApiError(
       422,
-      "PAID_EXCEEDS_ACQUISITION_COST",
-      `مبلغ پرداخت‌شده (${params.paidAmount}) نمی‌تواند بیشتر از بهای کل تمام‌شده (${formatDecimal(netAcquisitionDec, 2)}) باشد.`
+      "PAID_EXCEEDS_INVOICE_TOTAL",
+      `مبلغ پرداخت‌شده (${params.paidAmount}) نمی‌تواند بیشتر از جمع نهایی فاکتور (${formatDecimal(invoiceTotalDec, 2)}) باشد.`
     );
   }
-  const remainingPayableDec = subDec(netAcquisitionDec, paidDec);
+  const remainingPayableDec = subDec(invoiceTotalDec, paidDec);
 
   // Proportionally allocate shipping + customs - discount to each item's effective landed unit cost
   let allocatedTotal = BigInt(0);
@@ -148,6 +156,7 @@ export async function createLandedWarehouseReceipt(params: {
     const stockRes = await postStockDocumentTx(tx, {
       organizationId: params.organizationId,
       warehouseId: params.warehouseId,
+      documentId: params.documentId,
       documentType: "RECEIPT",
       documentDate: canonicalDate,
       reason: params.description || `رسید ورود کالا — فاکتور تأمین‌کننده ${params.supplierInvoiceNumber}`,
@@ -200,7 +209,7 @@ export async function createLandedWarehouseReceipt(params: {
         amount: formatDecimal(paidDec, 2),
         currency: organization.baseCurrency,
         txDate: canonicalDate,
-        trackingNumber: params.supplierInvoiceNumber,
+        trackingNumber: params.paymentTrackingNumber?.trim() || null,
         relatedDocumentType: "WAREHOUSE_RECEIPT",
         relatedDocumentId: stockRes.document.id,
         description: `پرداخت بابت رسید انبار ${stockRes.document.documentNumber} (فاکتور ${params.supplierInvoiceNumber})`,
@@ -216,12 +225,13 @@ export async function createLandedWarehouseReceipt(params: {
     const byRole = new Map(orgAccs.filter((a) => a.systemRole).map((a) => [a.systemRole!, a]));
     const invAcc = byRole.get("INVENTORY");
     const apAcc = byRole.get("AP");
+    const taxAcc = byRole.get("TAX_RECEIVABLE");
     const bankAcc = byRole.get("BANK");
     const cashAcc = byRole.get("CASH");
 
     let journalEntry = null;
-    if (!invAcc || (isPositiveDec(remainingPayableDec) && !apAcc)) {
-      throw new ApiError(422, "PURCHASE_ACCOUNTS_MISSING", "حساب موجودی کالا و حساب پرداختنی برای ثبت رسید خرید باید در کدینگ فعال باشند.");
+    if (!invAcc || (isPositiveDec(taxDec) && !taxAcc) || (isPositiveDec(remainingPayableDec) && !apAcc)) {
+      throw new ApiError(422, "PURCHASE_ACCOUNTS_MISSING", "حساب موجودی کالا، مالیات خرید و پرداختنی موردنیاز برای ثبت رسید باید در کدینگ فعال باشند.");
     }
     const jLines: JournalLineInput[] = [
         {
@@ -231,6 +241,14 @@ export async function createLandedWarehouseReceipt(params: {
           description: `بهای تمام‌شده رسید انبار ${stockRes.document.documentNumber} (شامل حمل و گمرک پس از تخفیف)`,
         },
       ];
+    if (isPositiveDec(taxDec)) {
+      jLines.push({
+        accountId: taxAcc!.id,
+        debit: formatDecimal(taxDec, 2),
+        credit: "0.00",
+        description: `اعتبار مالیات خرید فاکتور ${params.supplierInvoiceNumber}`,
+      });
+    }
     if (isPositiveDec(paidDec)) {
         const payGlId =
           paymentFinAcc?.accountId ??
@@ -267,7 +285,7 @@ export async function createLandedWarehouseReceipt(params: {
       });
     journalEntry = jr.entry;
 
-    // 4. Post Supplier Account Ledger entries (Credit net acquisition + Debit immediate payment)
+    // 4. Post Supplier Account Ledger entries (Credit invoice total + Debit immediate payment)
     await tx.insert(contactTransactions).values({
       organizationId: params.organizationId,
       contactId: supplier.id,
@@ -275,7 +293,7 @@ export async function createLandedWarehouseReceipt(params: {
       referenceId: stockRes.document.id,
       txDate: canonicalDate,
       debit: "0.00",
-      credit: formatDecimal(netAcquisitionDec, 2),
+      credit: formatDecimal(invoiceTotalDec, 2),
       description: `رسید انبار ${stockRes.document.documentNumber} — فاکتور تأمین‌کننده ${params.supplierInvoiceNumber}`,
     });
     if (isPositiveDec(paidDec)) {
@@ -300,8 +318,10 @@ export async function createLandedWarehouseReceipt(params: {
         shippingCost: formatDecimal(shippingDec, 2),
         customsAndExtraCost: formatDecimal(customsDec, 2),
         supplierDiscount: formatDecimal(discountDec, 2),
+        taxAmount: formatDecimal(taxDec, 2),
         totalAcquisitionCost: formatDecimal(netAcquisitionDec, 2),
         paymentBankAccountId: paymentFinAcc?.id ?? null,
+        paymentTrackingNumber: params.paymentTrackingNumber?.trim() || null,
         paidAmount: formatDecimal(paidDec, 2),
         remainingPayable: formatDecimal(remainingPayableDec, 2),
         attachmentUrl: params.attachmentUrl ?? null,
@@ -319,7 +339,9 @@ export async function createLandedWarehouseReceipt(params: {
         shipping_cost: formatDecimal(shippingDec, 2),
         customs_and_extra_cost: formatDecimal(customsDec, 2),
         supplier_discount: formatDecimal(discountDec, 2),
+        tax_amount: formatDecimal(taxDec, 2),
         total_acquisition_cost: formatDecimal(netAcquisitionDec, 2),
+        invoice_total: formatDecimal(invoiceTotalDec, 2),
         paid_amount: formatDecimal(paidDec, 2),
         remaining_payable: formatDecimal(remainingPayableDec, 2),
       },
@@ -699,6 +721,10 @@ export async function receiveMultiItemTransfer(params: {
       const hasDiscrepancy =
         isPositiveDec(nextMissing) || isPositiveDec(nextDamaged) || isPositiveDec(nextRejected);
       const fullyAccounted = accountedTotal === parseDecimal(target.quantitySent);
+      const discrepancyNote = (reqIt.discrepancy_description ?? reqIt.discrepancy_note ?? target.discrepancyNote ?? "").trim();
+      if ((hasDiscrepancy || !fullyAccounted) && !discrepancyNote) {
+        throw new ApiError(422, "TRANSFER_ITEM_DISCREPANCY_NOTE_REQUIRED", "برای مغایرت یا مقدار تحویل‌نشدهٔ هر قلم، توضیح همان ردیف را ثبت کنید.");
+      }
       const itemStatus = hasDiscrepancy
         ? "DISCREPANCY"
         : fullyAccounted
@@ -717,7 +743,7 @@ export async function receiveMultiItemTransfer(params: {
           quantityDamaged: formatDecimal(nextDamaged, 4),
           quantityRejected: formatDecimal(nextRejected, 4),
           discrepancyType: inferredDiscType ?? null,
-          discrepancyNote: reqIt.discrepancy_description ?? reqIt.discrepancy_note ?? target.discrepancyNote,
+          discrepancyNote: discrepancyNote || null,
           evidenceUrl: reqIt.evidence_url ?? target.evidenceUrl,
           evidenceAttachmentIds: reqIt.evidence_attachment_ids ?? target.evidenceAttachmentIds,
           itemStatus,

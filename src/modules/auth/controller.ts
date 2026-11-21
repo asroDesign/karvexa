@@ -128,7 +128,7 @@ export async function handleAuthRoutes(
     return ok({ action: "register-otp", status: "OTP_SENT", ...otpRes });
   }
 
-  // Request a passwordless login OTP. The response intentionally does not disclose whether the mobile is registered.
+  // Request a passwordless login OTP only after verifying that an active account exists.
   if (method === "POST" && sub === "request-login-otp") {
     const ip = getClientIp(req);
     checkRateLimit(`login-otp:${ip}`, 10, 60_000);
@@ -140,11 +140,11 @@ export async function handleAuthRoutes(
     checkRateLimit(`login-otp-mobile:${mobile}`, 5, 5 * 60_000);
     const [user] = await db.select({ id: users.id, status: users.status })
       .from(users).where(eq(users.phone, mobile)).limit(1);
-    if (user?.status === "ACTIVE") {
-      const otpRes = await issueOtpCode({ mobile, purpose: "LOGIN_OTP" });
-      return ok({ action: "request-login-otp", status: "OTP_SENT", ...otpRes });
+    if (!user || user.status !== "ACTIVE") {
+      throw new ApiError(404, "MOBILE_NOT_REGISTERED", "این شماره تلفن ثبت نشده است. ابتدا ثبت‌نام کنید.");
     }
-    return ok({ action: "request-login-otp", status: "OTP_SENT", expires_in_seconds: 300 });
+    const otpRes = await issueOtpCode({ mobile, purpose: "LOGIN_OTP" });
+    return ok({ action: "request-login-otp", status: "OTP_SENT", ...otpRes });
   }
 
   // Verify a passwordless login OTP and establish the same session/device context as password login.
@@ -847,12 +847,14 @@ export async function handleDeviceRoutes(
   segments: string[]
 ) {
   await ensureSeeded();
-  const ctx = await requireOrgContext(req, "org.dashboard.read");
   const seg1 = segments[1];
   const seg2 = segments[2];
 
   // POST /api/v1/devices/register
   if (method === "POST" && seg1 === "register") {
+    // Any active organization member may enroll their own client device. Sync APIs
+    // still enforce sync.execute, while device listing/revocation stays restricted.
+    const ctx = await requireOrgContext(req);
     const body = registerDeviceSchema.parse(await req.json());
     const [existing] = await db
       .select()
@@ -866,6 +868,9 @@ export async function handleDeviceRoutes(
       .limit(1);
 
     if (existing) {
+      if (existing.status !== "ACTIVE") {
+        throw new ApiError(403, "DEVICE_REVOKED", "این دستگاه توسط مدیر سازمان مسدود شده و قابل ثبت مجدد نیست.");
+      }
       const [updated] = await db
         .update(devices)
         .set({
@@ -873,7 +878,6 @@ export async function handleDeviceRoutes(
           platform: body.platform.toUpperCase(),
           osVersion: body.os_version ?? existing.osVersion,
           appVersion: body.app_version ?? existing.appVersion,
-          status: "ACTIVE",
           updatedAt: new Date(),
         })
         .where(eq(devices.id, existing.id))
@@ -895,6 +899,8 @@ export async function handleDeviceRoutes(
       .returning();
     return ok(created, 201);
   }
+
+  const ctx = await requireOrgContext(req, "org.dashboard.read");
 
   // GET /api/v1/devices
   if (method === "GET" && !seg1) {

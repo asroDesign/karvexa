@@ -20,6 +20,8 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
   const [profile, setProfile] = useState<Row | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [supplierModalOpen, setSupplierModalOpen] = useState(false);
+  const [supplierDraft, setSupplierDraft] = useState({ display_name: "", company_name: "", mobile: "", phone: "", economic_code: "" });
   const [filters, setFilters] = useState({ date_from: "", date_to: "", payment_method: "" });
   const [settlement, setSettlement] = useState({
     financial_account_id: "",
@@ -30,7 +32,7 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
     description: "تسویه حساب تأمین‌کننده",
   });
 
-  const reloadOptions = useCallback(async () => {
+  const reloadOptions = useCallback(async (preferredSupplierId?: string) => {
     if (!orgId) return;
     try {
       const [contacts, treasury] = await Promise.all([
@@ -43,7 +45,9 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
       const activeAccounts = list(treasury).filter((item) => Boolean(item.isActive ?? item.is_active ?? true));
       setSuppliers(eligible);
       setAccounts(activeAccounts);
-      setSupplierId((current) => eligible.some((item) => text(item.id) === current) ? current : text(eligible[0]?.id));
+      setSupplierId((current) => preferredSupplierId && eligible.some((item) => text(item.id) === preferredSupplierId)
+        ? preferredSupplierId
+        : eligible.some((item) => text(item.id) === current) ? current : text(eligible[0]?.id));
       setSettlement((current) => ({
         ...current,
         financial_account_id: activeAccounts.some((item) => text(item.id) === current.financial_account_id)
@@ -106,6 +110,40 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
     }
   }
 
+  async function createSupplier(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!orgId || busy) return;
+    const displayName = supplierDraft.display_name.trim();
+    if (displayName.length < 2) { onToast("نام تأمین‌کننده باید دست‌کم دو نویسه باشد.", "error"); return; }
+    setBusy(true);
+    try {
+      const created = await apiFetch<Row>("/api/v1/contacts", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          code: "SUP-" + crypto.randomUUID().slice(0, 8).toUpperCase(),
+          type: "SUPPLIER",
+          display_name: displayName,
+          company_name: supplierDraft.company_name.trim(),
+          mobile: supplierDraft.mobile.trim(),
+          phone: supplierDraft.phone.trim(),
+          economic_code: supplierDraft.economic_code.trim(),
+          opening_balance: "0.00",
+          credit_limit: "0.00",
+        }),
+      });
+      setSupplierDraft({ display_name: "", company_name: "", mobile: "", phone: "", economic_code: "" });
+      setSupplierModalOpen(false);
+      onToast("تأمین‌کننده ثبت شد و برای مشاهدهٔ دفتر حساب انتخاب شد.");
+      await reloadOptions(text(created.id));
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "ثبت تأمین‌کننده ناموفق بود", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function exportLedger() {
     const escapeCell = (value: unknown) => {
       let cell = text(value);
@@ -138,12 +176,12 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
     </header>
 
     <div className={card + " grid gap-3 md:grid-cols-[minmax(220px,1fr)_2fr]"}>
-      <label className="text-xs font-semibold">انتخاب تأمین‌کننده
-        <select className={input + " mt-1"} value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
+      <div className="space-y-1"><div className="flex items-center justify-between gap-2"><label htmlFor="supplier-account-picker" className="text-xs font-semibold">انتخاب تأمین‌کننده</label><button type="button" className="rounded-lg border border-emerald-200 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50" onClick={() => setSupplierModalOpen(true)}>+ ثبت تأمین‌کننده</button></div>
+        <select id="supplier-account-picker" className={input + " mt-1"} value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
           <option value="">انتخاب تأمین‌کننده</option>
           {suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}{text(item.code) ? " • " + text(item.code) : ""}</option>)}
         </select>
-      </label>
+      </div>
       {supplierId && <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-600">
         <span>{text(supplier.mobile ?? supplier.phone, "شماره تماس ثبت نشده")}</span>
         <span>کد اقتصادی: {text(supplier.economic_code ?? supplier.economicCode, "—")}</span>
@@ -191,5 +229,19 @@ export function SupplierAccountsPanel({ orgId, onToast }: { orgId: string | null
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2"><div className="max-h-64 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-xs">گردش دفتر تفصیلی</strong>{ledger.map((row, index) => <div key={text(row.id, String(index))} className="flex flex-wrap justify-between gap-2 border-b border-slate-100 py-2 text-[11px]"><span>{formatDateFa(text(row.txDate ?? row.tx_date))} • {text(row.description)}</span><span className="tabular-nums">بد {formatIrr(text(row.debit))} / بس {formatIrr(text(row.credit))}</span></div>)}{!ledger.length && <p className="py-3 text-[11px] text-slate-500">گردشی در این بازه ثبت نشده است.</p>}</div><div className="max-h-64 overflow-auto rounded-xl border border-slate-100 p-3"><strong className="text-xs">پرداخت‌های ثبت‌شده در خزانه</strong>{settlements.map((row, index) => <div key={"payment-" + text(row.id, String(index))} className="flex flex-wrap justify-between gap-2 border-b border-slate-100 py-2 text-[11px]"><span>{formatDateFa(text(row.txDate ?? row.tx_date))} • {text(row.description)}</span><span className="font-semibold">{formatIrr(text(row.amount))} ریال</span></div>)}</div></div>
       </section>
     </>}
+    {supplierModalOpen && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSupplierModalOpen(false); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="supplier-create-title" className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl">
+        <div className="mb-4 flex items-center justify-between gap-3"><h3 id="supplier-create-title" className="text-base font-extrabold">ثبت تأمین‌کننده جدید</h3><button type="button" className="rounded-lg border px-3 py-1 text-lg" aria-label="بستن" onClick={() => setSupplierModalOpen(false)}>×</button></div>
+        <p className="mb-4 text-xs leading-6 text-slate-600">پس از ثبت، تأمین‌کننده به فهرست حساب‌ها اضافه و دفتر حساب آن باز می‌شود.</p>
+        <form onSubmit={createSupplier} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="text-xs sm:col-span-2">نام شخص / شرکت *<input autoFocus required minLength={2} maxLength={140} className={input + " mt-1"} value={supplierDraft.display_name} onChange={(event) => setSupplierDraft({ ...supplierDraft, display_name: event.target.value })}/></label>
+          <label className="text-xs">نام شرکت<input maxLength={140} className={input + " mt-1"} value={supplierDraft.company_name} onChange={(event) => setSupplierDraft({ ...supplierDraft, company_name: event.target.value })}/></label>
+          <label className="text-xs">موبایل<input inputMode="tel" className={input + " mt-1"} value={supplierDraft.mobile} onChange={(event) => setSupplierDraft({ ...supplierDraft, mobile: event.target.value })}/></label>
+          <label className="text-xs">تلفن ثابت<input inputMode="tel" className={input + " mt-1"} value={supplierDraft.phone} onChange={(event) => setSupplierDraft({ ...supplierDraft, phone: event.target.value })}/></label>
+          <label className="text-xs">کد اقتصادی<input className={input + " mt-1"} value={supplierDraft.economic_code} onChange={(event) => setSupplierDraft({ ...supplierDraft, economic_code: event.target.value })}/></label>
+          <div className="flex justify-end gap-2 sm:col-span-2"><button type="button" className="rounded-xl border px-4 py-2 text-xs" onClick={() => setSupplierModalOpen(false)}>انصراف</button><button disabled={busy} className={button}>{busy ? "در حال ثبت…" : "ثبت و مشاهده حساب"}</button></div>
+        </form>
+      </section>
+    </div>}
   </section>;
 }

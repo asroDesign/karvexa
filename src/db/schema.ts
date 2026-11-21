@@ -231,6 +231,24 @@ export const contacts = pgTable(
     firstName: varchar("first_name", { length: 100 }),
     lastName: varchar("last_name", { length: 100 }),
     companyName: varchar("company_name", { length: 180 }),
+    birthDateEpoch: bigint("birth_date_epoch", { mode: "number" }),
+    gender: varchar("gender", { length: 20 }).notNull().default("UNSPECIFIED"),
+    customerTags: jsonb("customer_tags").$type<string[]>().notNull().default([]),
+    awarenessSource: varchar("awareness_source", { length: 80 }),
+    marketingConsent: boolean("marketing_consent").notNull().default(false),
+    province: varchar("province", { length: 80 }),
+    city: varchar("city", { length: 80 }),
+    branchLocalId: varchar("branch_local_id", { length: 36 }),
+    membershipDateEpoch: bigint("membership_date_epoch", { mode: "number" }),
+    customerSegment: varchar("customer_segment", { length: 32 }).notNull().default("REGULAR"),
+    supplierCategory: varchar("supplier_category", { length: 100 }),
+    supplierSettlementMethod: varchar("supplier_settlement_method", { length: 24 }),
+    supplierPaymentDueDays: integer("supplier_payment_due_days").notNull().default(0),
+    supplierDeliveryLeadTimeDays: integer("supplier_delivery_lead_time_days").notNull().default(0),
+    supplierBankName: varchar("supplier_bank_name", { length: 100 }),
+    supplierCardNumber: varchar("supplier_card_number", { length: 32 }),
+    supplierSheba: varchar("supplier_sheba", { length: 32 }),
+    supplierBankAccountNumber: varchar("supplier_bank_account_number", { length: 64 }),
     contactType: varchar("contact_type", { length: 24 }).notNull().default("CUSTOMER"), // CUSTOMER | SUPPLIER | BOTH | EMPLOYEE | OTHER
     mobile: varchar("mobile", { length: 32 }),
     phone: varchar("phone", { length: 32 }),
@@ -776,8 +794,10 @@ export const stockDocuments = pgTable(
     shippingCost: numeric("shipping_cost", { precision: 18, scale: 2 }).notNull().default("0.00"),
     customsAndExtraCost: numeric("customs_and_extra_cost", { precision: 18, scale: 2 }).notNull().default("0.00"),
     supplierDiscount: numeric("supplier_discount", { precision: 18, scale: 2 }).notNull().default("0.00"),
+    taxAmount: numeric("tax_amount", { precision: 18, scale: 2 }).notNull().default("0.00"),
     totalAcquisitionCost: numeric("total_acquisition_cost", { precision: 18, scale: 2 }).notNull().default("0.00"),
     paymentBankAccountId: uuid("payment_bank_account_id"),
+    paymentTrackingNumber: varchar("payment_tracking_number", { length: 80 }),
     paidAmount: numeric("paid_amount", { precision: 18, scale: 2 }).notNull().default("0.00"),
     remainingPayable: numeric("remaining_payable", { precision: 18, scale: 2 }).notNull().default("0.00"),
     attachmentUrl: text("attachment_url"),
@@ -1423,6 +1443,8 @@ export const cheques = pgTable(
     dueDate: date("due_date").notNull(),
     relatedDocumentType: varchar("related_document_type", { length: 48 }),
     relatedDocumentId: uuid("related_document_id"),
+    referenceDocumentNumber: varchar("reference_document_number", { length: 120 }),
+    reminderDateEpoch: bigint("reminder_date_epoch", { mode: "number" }),
     journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id, { onDelete: "set null" }),
     status: varchar("status", { length: 24 }).notNull().default("RECEIVED"), // RECEIVED | ISSUED | ENDORSED | DEPOSITED | CASHED | BOUNCED | CANCELLED
     notes: text("notes"),
@@ -2562,6 +2584,48 @@ export const loyaltyAccounts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [uniqueIndex("uq_loyalty_org_contact").on(t.organizationId, t.contactId)]
+);
+
+export const loyaltyMembershipTiers = pgTable(
+  "loyalty_membership_tiers",
+  {
+    id: uuid("id").primaryKey(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 80 }).notNull(),
+    minimumPoints: numeric("minimum_points", { precision: 18, scale: 2 }).notNull().default("0.00"),
+    colorHex: varchar("color_hex", { length: 7 }).notNull().default("#78909C"),
+    isActive: boolean("is_active").notNull().default(true),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    version: integer("version").notNull().default(1),
+    syncSeq: bigint("sync_seq", { mode: "number" }).notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_loyalty_tier_org_name").on(t.organizationId, t.name),
+    index("idx_loyalty_tier_org_sync").on(t.organizationId, t.syncSeq),
+  ]
+);
+
+export const loyaltyProgramSettings = pgTable(
+  "loyalty_program_settings",
+  {
+    id: uuid("id").primaryKey(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    purchaseAmountPerPoint: numeric("purchase_amount_per_point", { precision: 18, scale: 2 }).notNull().default("1000000.00"),
+    version: integer("version").notNull().default(1),
+    syncSeq: bigint("sync_seq", { mode: "number" }).notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("uq_loyalty_program_settings_org").on(t.organizationId),
+    index("idx_loyalty_program_settings_org_sync").on(t.organizationId, t.syncSeq),
+  ]
 );
 
 export const loyaltyTransactions = pgTable(

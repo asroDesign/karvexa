@@ -2,19 +2,14 @@ import { NextRequest } from "next/server";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
-import {
-  cloudMigrationSessions,
-  devices,
-  organizationOperatingModes,
-  organizations,
-} from "@/db/schema";
+import { cloudMigrationSessions, organizationOperatingModes, organizations } from "@/db/schema";
 import { ensureSeeded } from "@/db/seed";
 import { recordAuditLog } from "@/lib/audit";
 import { ApiError, ok } from "@/lib/errors";
 import { checkIdempotency, saveIdempotency } from "@/lib/idempotency";
 import { requireOrgContext } from "@/lib/tenant";
 import { encodeSyncCursor } from "@/modules/sync/changelog";
-import { pushSyncBatch } from "@/modules/sync/service";
+import { pushSyncBatch, resolveActiveSyncDevice } from "@/modules/sync/service";
 
 /**
  * Master Prompt 08 §2.11 & §2.12 — OFFLINE_ONLY Operating Mode & Controlled Resumable Cloud Reactivation
@@ -194,14 +189,7 @@ export async function handleCloudMigrationRoutes(
     });
     if (cached) return ok(cached.responseBody, cached.statusCode, { replayed: true });
 
-    const [dev] = await db
-      .select()
-      .from(devices)
-      .where(and(eq(devices.id, body.device_id), eq(devices.organizationId, ctx.organizationId)))
-      .limit(1);
-    if (!dev || dev.status !== "ACTIVE") {
-      throw new ApiError(403, "DEVICE_NOT_REGISTERED", "دستگاه مجاز برای مهاجرت ابری یافت نشد.");
-    }
+    const dev = await resolveActiveSyncDevice(ctx.organizationId, body.device_id);
 
     const [session] = await db
       .insert(cloudMigrationSessions)

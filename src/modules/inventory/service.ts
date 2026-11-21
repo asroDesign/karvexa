@@ -166,6 +166,7 @@ export async function postStockDocumentTx(
   params: {
     organizationId: string;
     warehouseId: string;
+    documentId?: string;
     documentType: "RECEIPT" | "ISSUE" | "TRANSFER_OUT" | "TRANSFER_IN" | "ADJUSTMENT" | "OPENING";
     documentDate: string;
     reason: string;
@@ -209,6 +210,7 @@ export async function postStockDocumentTx(
   const [doc] = await tx
     .insert(stockDocuments)
     .values({
+      ...(params.documentId ? { id: params.documentId } : {}),
       organizationId: params.organizationId,
       warehouseId: params.warehouseId,
       documentNumber: docNum,

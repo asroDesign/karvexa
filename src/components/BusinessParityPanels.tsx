@@ -214,15 +214,20 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   const [selectedStockDocument, setSelectedStockDocument] = useState<Row | null>(null);
   const [issue, setIssue] = useState({ warehouse_id: "", document_date_jalali: jalaliToday(), description: "حواله خروج کالا" });
   const [issueItems, setIssueItems] = useState<IssueLine[]>([{ product_id: "", variant_id: "", quantity: "", unit_cost: "" }]);
-  const [receipt, setReceipt] = useState({ warehouse_id: "", supplier_id: "", supplier_invoice_number: "", invoice_date_jalali: jalaliToday(), shipping_cost: "0.00", customs_and_extra_cost: "0.00", supplier_discount: "0.00", paid_amount: "0.00", payment_bank_account_id: "", description: "رسید خرید کالا" });
+  const [receipt, setReceipt] = useState({ warehouse_id: "", supplier_id: "", supplier_invoice_number: "", invoice_date_jalali: jalaliToday(), shipping_cost: "0.00", customs_and_extra_cost: "0.00", supplier_discount: "0.00", tax_amount: "0.00", paid_amount: "0.00", payment_bank_account_id: "", payment_tracking_number: "", description: "رسید خرید کالا" });
   const [receiptMode, setReceiptMode] = useState<"PURCHASE" | "ADJUSTMENT">("PURCHASE");
+  const [supplierCreateOpen, setSupplierCreateOpen] = useState(false);
+  const [supplierCreating, setSupplierCreating] = useState(false);
+  const [supplierDraft, setSupplierDraft] = useState({ display_name: "", company_name: "", mobile: "", phone: "", economic_code: "" });
   const [adjustmentDirection, setAdjustmentDirection] = useState<"IN" | "OUT">("IN");
   const [receiptItems, setReceiptItems] = useState<ProductLine[]>([{ product_id: "", variant_id: "", quantity: "", unit_price: "" }]);
   const [transferForm, setTransferForm] = useState({ source_warehouse_id: "", destination_warehouse_id: "", transfer_date_jalali: jalaliToday(), reason: "انتقال بین انبارها", source_responsible_name: "", destination_responsible_name: "", notes: "" });
   const [transferItems, setTransferItems] = useState<TransferLine[]>([{ product_id: "", variant_id: "", quantity: "" }]);
   const [selectedTransfer, setSelectedTransfer] = useState<Row | null>(null);
+  const [viewedTransfer, setViewedTransfer] = useState<Row | null>(null);
   const [receiveLines, setReceiveLines] = useState<ReceiveLine[]>([]);
   const [receiveDate, setReceiveDate] = useState(jalaliToday());
+  const [receiveNotes, setReceiveNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [transferPendingAction, setTransferPendingAction] = useState("");
@@ -317,6 +322,33 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     }
   }
 
+  async function createInventorySupplier(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!orgId || supplierCreating) return;
+    const displayName = supplierDraft.display_name.trim();
+    if (displayName.length < 2) { onToast("نام تأمین‌کننده باید دست‌کم دو نویسه باشد.", "error"); return; }
+    setSupplierCreating(true);
+    try {
+      const created = await apiFetch<Row>("/api/v1/contacts", {
+        method: "POST",
+        organizationId: orgId,
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ code: "SUP-" + crypto.randomUUID().slice(0, 8).toUpperCase(), type: "SUPPLIER", display_name: displayName, company_name: supplierDraft.company_name.trim(), mobile: supplierDraft.mobile.trim(), phone: supplierDraft.phone.trim(), economic_code: supplierDraft.economic_code.trim(), opening_balance: "0.00", credit_limit: "0.00" }),
+      });
+      const newId = text(created.id);
+      if (!newId) throw new Error("شناسه تأمین‌کننده از سرور دریافت نشد.");
+      setContacts((current) => [created, ...current.filter((item) => text(item.id) !== newId)]);
+      setReceipt((current) => ({ ...current, supplier_id: newId }));
+      setSupplierDraft({ display_name: "", company_name: "", mobile: "", phone: "", economic_code: "" });
+      setSupplierCreateOpen(false);
+      onToast("تأمین‌کننده ثبت و در رسید خرید انتخاب شد.");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "ثبت تأمین‌کننده ناموفق بود", "error");
+    } finally {
+      setSupplierCreating(false);
+    }
+  }
+
   async function createReceipt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!orgId) return;
@@ -324,6 +356,13 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     if (!receipt.warehouse_id || validItems.length === 0 || (receiptMode === "PURCHASE" && (!receipt.supplier_id || !receipt.supplier_invoice_number.trim()))) {
       onToast(receiptMode === "PURCHASE" ? "انبار، تأمین‌کننده، شماره فاکتور و دست‌کم یک قلم معتبر را وارد کنید." : "انبار و دست‌کم یک قلم تعدیل با مقدار مثبت را وارد کنید.", "error");
       return;
+    }
+    if (receiptMode === "PURCHASE") {
+      const itemsTotal = validItems.reduce((sum, item) => sum + Number(item.quantity) * Number(item.unit_price), 0);
+      const inventoryCost = itemsTotal + Number(receipt.shipping_cost || 0) + Number(receipt.customs_and_extra_cost || 0) - Number(receipt.supplier_discount || 0);
+      const invoiceTotal = inventoryCost + Number(receipt.tax_amount || 0);
+      if (inventoryCost < 0) { onToast("تخفیف فروشنده نمی‌تواند از جمع کالا، حمل و هزینه‌های جانبی بیشتر باشد.", "error"); return; }
+      if (Number(receipt.paid_amount || 0) > invoiceTotal) { onToast("پرداخت اولیه نمی‌تواند از جمع نهایی فاکتور بیشتر باشد.", "error"); return; }
     }
     setReceiptSubmitting(true);
     try {
@@ -353,7 +392,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         body: JSON.stringify(body),
       });
       onToast(receiptMode === "PURCHASE" ? "رسید خرید با تخصیص هزینه‌های جانبی در موجودی و حساب تأمین‌کننده ثبت شد." : `تعدیل ${adjustmentDirection === "IN" ? "افزایشی" : "کاهشی"} با بهای میانگین موجودی و سند مالی دوبل در سرور ثبت شد.`);
-      setReceipt((old) => ({ ...old, supplier_invoice_number: "", paid_amount: "0.00" }));
+      setReceipt((old) => ({ ...old, supplier_invoice_number: "", shipping_cost: "0.00", customs_and_extra_cost: "0.00", supplier_discount: "0.00", tax_amount: "0.00", paid_amount: "0.00", payment_tracking_number: "" }));
       await reload();
     } catch (error) { onToast(error instanceof Error ? error.message : "ثبت رسید کالا ناموفق بود", "error"); }
     finally { setReceiptSubmitting(false); }
@@ -508,6 +547,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     const items = rows(transfer.items);
     setSelectedTransfer(transfer);
     setReceiveDate(jalaliToday());
+    setReceiveNotes("");
     setReceiveLines(items.map((item) => {
       const sent = Number(item.quantitySent ?? item.quantity_sent ?? item.quantity ?? 0);
       const accepted = Number(item.quantityAccepted ?? item.quantity_accepted ?? 0);
@@ -522,6 +562,16 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
   async function receiveTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!orgId || !selectedTransfer) return;
+    const missingExplanation = receiveLines.some((line) => {
+      const item = rows(selectedTransfer.items).find((row) => text(row.id) === line.transfer_item_id);
+      if (!item) return false;
+      const sent = Number(item.quantitySent ?? item.quantity_sent ?? item.quantity ?? 0);
+      const previouslyAccounted = Number(item.quantityAccepted ?? item.quantity_accepted ?? 0) + Number(item.quantityMissing ?? item.quantity_missing ?? 0) + Number(item.quantityDamaged ?? item.quantity_damaged ?? 0) + Number(item.quantityRejected ?? item.quantity_rejected ?? 0);
+      const currentCounted = Number(line.accepted_quantity || 0) + Number(line.missing_qty || 0) + Number(line.damaged_qty || 0) + Number(line.rejected_quantity || 0);
+      const hasDifference = Number(line.missing_qty || 0) > 0 || Number(line.damaged_qty || 0) > 0 || Number(line.rejected_quantity || 0) > 0 || previouslyAccounted + currentCounted < sent;
+      return hasDifference && !line.discrepancy_description.trim() && !text(item.discrepancyNote ?? item.discrepancy_note).trim();
+    });
+    if (missingExplanation) { onToast("برای هر قلم دارای اختلاف، توضیح همان ردیف را وارد کنید.", "error"); return; }
     const transferId = text(selectedTransfer.id);
     const requestId = "transfer:" + transferId + ":receive";
     if (transferRequestsInFlight.current.has(requestId)) return;
@@ -532,7 +582,7 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
     try {
       await apiFetch("/api/v1/inventory/transfers/" + transferId + "/receive", {
         method: "POST", organizationId: orgId, headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ received_date_jalali: receiveDate, items: receiveLines.filter((line) => line.product_id) }),
+        body: JSON.stringify({ received_date_jalali: receiveDate, notes: receiveNotes.trim(), items: receiveLines.filter((line) => line.product_id) }),
       });
       transferRequestKeys.current.delete(requestId);
       onToast("مقدار پذیرفته‌شده وارد مقصد شد و کسری/آسیب در گردش حواله ثبت شد.");
@@ -606,13 +656,17 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
         <div className="max-h-56 space-y-2 overflow-auto">{shownStockDocuments.map((document) => <button key={text(document.id)} type="button" onClick={() => void openStockDocument(document, documentFilter === "RECEIPT" ? "receipts" : "issues")} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-right text-xs hover:bg-slate-50"><span><strong>{text(document.document_number, "سند انبار")}</strong> • {gregorianIsoToJalali(text(document.document_date))} • {text(document.reason ?? document.description)}</span><span className="rounded-full bg-slate-100 px-2 py-1">{text(document.status)}</span></button>)}{!shownStockDocuments.length && <div className="py-4 text-center text-xs text-slate-500">سندی مطابق جستجو پیدا نشد.</div>}</div>
         {selectedStockDocument && <div className="space-y-2 rounded-xl border border-teal-200 bg-teal-50/40 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">{text(selectedStockDocument.document_number)} • {gregorianIsoToJalali(text(selectedStockDocument.document_date))}</strong><div className="flex gap-2"><button type="button" onClick={printStockDocument} className="rounded-lg border px-3 py-1.5 text-xs">چاپ سند</button><button type="button" onClick={() => setSelectedStockDocument(null)} className="text-xs underline">بستن</button></div></div><div className="text-[11px]">{rows(selectedStockDocument.items).map((item) => `${text(item.product_name)}: ${formatQty(text(item.quantity))}`).join("، ")}</div></div>}
       </div>}
-      <div className={inventoryView === "operations" || inventoryView === "transfers" ? "grid grid-cols-1 gap-4 xl:grid-cols-2" : "hidden"}>
+      <div className={inventoryView === "operations" ? "grid grid-cols-1 gap-4 xl:grid-cols-2" : inventoryView === "transfers" ? "block" : "hidden"}>
         {inventoryView === "operations" && <form onSubmit={createReceipt} className={`${card} space-y-3`}>
           <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-xs font-bold">ثبت رسید خرید / تعدیل</h4><p className="mt-1 text-[11px] text-slate-500">رسید خرید با بهای تمام‌شده یا تعدیل افزایشی/کاهشی با بهای میانگین را ثبت کنید.</p></div><div className="flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setReceiptMode("PURCHASE")} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "PURCHASE" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>رسید خرید</button><button type="button" onClick={() => setReceiptMode("ADJUSTMENT")} className={`rounded-lg px-3 py-2 text-[11px] ${receiptMode === "ADJUSTMENT" ? "bg-white font-bold shadow-sm" : "text-slate-600"}`}>تعدیل موجودی</button></div></div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label>{receiptMode === "PURCHASE" && <label className="text-[11px]">تأمین‌کننده<select className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></label>}{receiptMode === "PURCHASE" && <label className="text-[11px]">شماره فاکتور تأمین‌کننده<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label>}{receiptMode === "ADJUSTMENT" && <label className="text-[11px]">نوع تعدیل<select className={`${field} mt-1`} value={adjustmentDirection} onChange={(event) => setAdjustmentDirection(event.target.value as "IN" | "OUT")}><option value="IN">افزایش موجودی</option><option value="OUT">کاهش موجودی</option></select></label>}<label className="text-[11px]">{receiptMode === "PURCHASE" ? "تاریخ فاکتور" : "تاریخ تعدیل"}<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="text-[11px]">انبار{warehouseSelect(receipt.warehouse_id, (value) => setReceipt({ ...receipt, warehouse_id: value }))}</label>{receiptMode === "PURCHASE" && <div className="space-y-1"><div className="flex items-center justify-between gap-2"><label htmlFor="inventory-receipt-supplier" className="text-[11px]">تأمین‌کننده</label><button type="button" className="rounded-lg border border-emerald-200 px-2 py-1 text-[10px] font-semibold text-emerald-800" onClick={() => setSupplierCreateOpen(true)}>+ ثبت تأمین‌کننده</button></div><select id="inventory-receipt-supplier" className={`${field} mt-1`} required value={receipt.supplier_id} onChange={(event) => setReceipt({ ...receipt, supplier_id: event.target.value })}><option value="">انتخاب تأمین‌کننده</option>{suppliers.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.display_name ?? item.name)}</option>)}</select></div>}{receiptMode === "PURCHASE" && <label className="text-[11px]">شماره فاکتور تأمین‌کننده<input className={`${field} mt-1`} required value={receipt.supplier_invoice_number} onChange={(event) => setReceipt({ ...receipt, supplier_invoice_number: event.target.value })}/></label>}{receiptMode === "ADJUSTMENT" && <label className="text-[11px]">نوع تعدیل<select className={`${field} mt-1`} value={adjustmentDirection} onChange={(event) => setAdjustmentDirection(event.target.value as "IN" | "OUT")}><option value="IN">افزایش موجودی</option><option value="OUT">کاهش موجودی</option></select></label>}<label className="text-[11px]">{receiptMode === "PURCHASE" ? "تاریخ فاکتور" : "تاریخ تعدیل"}<JalaliDatePicker className="mt-1" value={receipt.invoice_date_jalali} onChange={(value) => setReceipt({ ...receipt, invoice_date_jalali: value })}/></label></div>
           <div className="space-y-2">{receiptItems.map((line, index) => <div key={index} className={`grid grid-cols-1 gap-2 ${receiptMode === "PURCHASE" ? "sm:grid-cols-[1.3fr_1fr_.65fr_1fr]" : "sm:grid-cols-[1.5fr_1fr_1fr]"}`}>{lineSelect(line.product_id, (productId) => { const product = products.find((item) => text(item.id) === productId); updateProductLine(index, { product_id: productId, variant_id: "", unit_price: text(product?.purchase_price ?? product?.defaultPurchasePrice, line.unit_price) }); }, (product) => updateProductLine(index, { unit_price: text(product.purchase_price ?? product.defaultPurchasePrice, line.unit_price) }))}{variantSelect(line.product_id, line.variant_id, (variantId) => { const variant = variants.find((item) => text(item.id) === variantId); const product = products.find((item) => text(item.id) === line.product_id); updateProductLine(index, { variant_id: variantId, unit_price: text(variant?.purchase_price, text(product?.purchase_price, line.unit_price)) }); })}<input className={field} aria-label={receiptMode === "PURCHASE" ? "تعداد خرید" : adjustmentDirection === "IN" ? "مقدار افزایش موجودی" : "مقدار کاهش موجودی"} placeholder={receiptMode === "PURCHASE" ? "تعداد" : adjustmentDirection === "IN" ? "مقدار ورود" : "مقدار خروج"} required dir="ltr" inputMode="decimal" value={line.quantity} onChange={(event) => updateProductLine(index, { quantity: event.target.value })}/>{receiptMode === "PURCHASE" ? <input className={field} aria-label="قیمت واحد" placeholder="قیمت خرید واحد" required dir="ltr" inputMode="decimal" value={line.unit_price} onChange={(event) => updateProductLine(index, { unit_price: event.target.value })}/> : <div className="rounded-xl bg-slate-50 px-3 py-2 text-[10px] text-slate-600">موجودی فعلی: {formatQty(onHandQty(receipt.warehouse_id, line.product_id, line.variant_id))} • موجودی بعد از تعدیل: {formatQty((onHandQty(receipt.warehouse_id, line.product_id, line.variant_id) + (adjustmentDirection === "IN" ? 1 : -1) * Number(line.quantity || 0)).toFixed(4))}</div>}</div>)}</div>
           <div className="flex gap-2"><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" onClick={() => setReceiptItems((items) => [...items, { product_id: text(products[0]?.id), variant_id: "", quantity: "1.0000", unit_price: text(products[0]?.purchase_price, "0.00") }])}>افزودن قلم</button><button type="button" className="rounded-xl border border-slate-200 px-3 py-2 text-xs" disabled={receiptItems.length <= 1} onClick={() => setReceiptItems((items) => items.slice(0, -1))}>حذف قلم آخر</button></div>
-          {receiptMode === "PURCHASE" && <><div className="grid grid-cols-2 gap-2 md:grid-cols-4">{([["shipping_cost", "هزینه حمل"], ["customs_and_extra_cost", "گمرک و سایر هزینه"], ["supplier_discount", "تخفیف"], ["paid_amount", "پرداخت‌شده"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>{Number(receipt.paid_amount) > 0 && <label className="block text-[11px]">پرداخت از حساب<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}>{treasury.map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label>}</>}
+          {receiptMode === "PURCHASE" && <>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-5">{([["shipping_cost", "هزینه ارسال"], ["tax_amount", "مالیات فاکتور"], ["customs_and_extra_cost", "گمرک / هزینه جانبی"], ["supplier_discount", "تخفیف فروشنده"], ["paid_amount", "پرداخت اولیه"]] as const).map(([key, label]) => <label key={key} className="text-[11px]">{label}<input className={`${field} mt-1`} dir="ltr" inputMode="decimal" min="0" value={receipt[key]} onChange={(event) => setReceipt({ ...receipt, [key]: event.target.value })}/></label>)}</div>
+            {Number(receipt.paid_amount) > 0 && <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><label className="block text-[11px]">بانک / صندوق پرداخت<select className={`${field} mt-1`} required value={receipt.payment_bank_account_id} onChange={(event) => setReceipt({ ...receipt, payment_bank_account_id: event.target.value })}><option value="">انتخاب حساب پرداخت</option>{treasury.filter((item) => Boolean(item.is_active ?? item.isActive ?? true)).map((item) => <option key={text(item.id)} value={text(item.id)}>{text(item.name)} — {formatIrr(text(item.balance))} ریال</option>)}</select></label><label className="block text-[11px]">شماره پیگیری رسید پرداخت<input className={`${field} mt-1`} maxLength={80} value={receipt.payment_tracking_number} onChange={(event) => setReceipt({ ...receipt, payment_tracking_number: event.target.value })}/></label></div>}
+            <div className="rounded-xl border border-teal-100 bg-teal-50/60 px-3 py-2 text-[11px] text-slate-700">جمع کالاها: <b>{formatIrr(String(receiptItems.filter((item) => Number(item.quantity) > 0 && Number(item.unit_price) >= 0).reduce((sum, item) => sum + Number(item.quantity) * Number(item.unit_price), 0)))} ریال</b> • جمع نهایی با مالیات و هزینه‌ها پس از تخفیف: <b>{formatIrr(String(receiptItems.filter((item) => Number(item.quantity) > 0 && Number(item.unit_price) >= 0).reduce((sum, item) => sum + Number(item.quantity) * Number(item.unit_price), 0) + Number(receipt.shipping_cost || 0) + Number(receipt.customs_and_extra_cost || 0) + Number(receipt.tax_amount || 0) - Number(receipt.supplier_discount || 0)))} ریال</b></div>
+          </>}
           {receiptMode === "ADJUSTMENT" && <p className="rounded-xl bg-amber-50 p-3 text-[10px] leading-5 text-amber-900">تعدیل از مسیر انبارگردانی ثبت می‌شود؛ برای کاهش، موجودی کافی الزامی است. ارزش تعدیل با بهای میانگین/FIFO کالا محاسبه و سند دوطرفهٔ موجودی و بهای تمام‌شده از API صادر می‌شود.</p>}
           <div className="flex gap-2"><input className={field} aria-label="شرح سند" value={receipt.description} onChange={(event) => setReceipt({ ...receipt, description: event.target.value })}/><button disabled={receiptSubmitting} className={button}>{receiptSubmitting ? "در حال ثبت…" : receiptMode === "PURCHASE" ? "ثبت رسید خرید" : "ثبت تعدیل موجودی"}</button></div>
         </form>}
@@ -684,47 +738,61 @@ export function InventoryParityPanel({ orgId, onToast }: { orgId: string | null;
       {inventoryView === "transfers" && <div className={`${card} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-xs font-bold">حواله‌های انتقال و پذیرش</h4><div className="flex flex-wrap gap-2"><input className={`${field} max-w-sm`} value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="جستجوی شماره، انبار، کالا یا تنوع"/><select className={`${field} max-w-xs`} value={transferStatusFilter} onChange={(event) => setTransferStatusFilter(event.target.value)}><option value="ALL">همه وضعیت‌ها</option><option value="DRAFT">پیش‌نویس</option><option value="SUBMITTED">در انتظار ارسال</option><option value="IN_TRANSIT">در مسیر</option><option value="PARTIALLY_RECEIVED">تحویل بخشی</option><option value="DISCREPANCY_REPORTED">دارای مغایرت</option><option value="RECEIVED">تحویل کامل</option><option value="COMPLETED">بسته‌شده</option><option value="CANCELLED">ابطال‌شده</option></select></div></div>
         <div className="space-y-2">{shownTransfers.slice(0, 100).map((transfer) => {
-          const id = text(transfer.id); const status = text(transfer.status);
+          const id = text(transfer.id);
+          const status = text(transfer.status);
           const sourceName = text(transfer.source_warehouse_name, text(warehouses.find((warehouse) => text(warehouse.id) === text(transfer.source_warehouse_id))?.name, "مبدأ"));
           const destinationName = text(transfer.destination_warehouse_name, text(warehouses.find((warehouse) => text(warehouse.id) === text(transfer.destination_warehouse_id))?.name, "مقصد"));
-          return (
-            <div key={id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 p-3 text-xs">
-              <div className="min-w-0">
-                <strong>{text(transfer.transferNumber ?? transfer.transfer_number, "حواله")}</strong>
-                <span className="mx-1 text-slate-500">• {gregorianIsoToJalali(text(transfer.transferDate ?? transfer.transfer_date))}</span>
-                {" — "}{sourceName} ← {destinationName}
-                <span className="mx-1 rounded-full bg-slate-100 px-2 py-0.5">{transferStatusLabels[status] ?? status}</span>
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
-                  {rows(transfer.items).map((item, index) => (
-                    <span key={text(item.id, String(index))}>
-                      {text(item.product_name ?? item.productName)}
-                      {text(item.variant_name ?? item.variantName) ? " • " + text(item.variant_name ?? item.variantName) : ""}
-                      {": "}{formatQty(text(item.quantitySent ?? item.quantity_sent ?? item.quantity))}
-                    </span>
-                  ))}
-                </div>
-                <div className="mt-1 text-[10px] text-slate-500">
-                  مسئول مبدأ: {text(transfer.sourceResponsibleName ?? transfer.source_responsible_name, "—")}
-                  {" · "}مسئول مقصد: {text(transfer.destinationResponsibleName ?? transfer.destination_responsible_name, "—")}
-                </div>
+          const transferItems = rows(transfer.items);
+          const hasDiscrepancy = status === "DISCREPANCY_REPORTED" || transferItems.some((item) => Number(item.quantityMissing ?? item.quantity_missing ?? item.missing_qty ?? 0) > 0 || Number(item.quantityDamaged ?? item.quantity_damaged ?? item.damaged_qty ?? 0) > 0 || Number(item.quantityRejected ?? item.quantity_rejected ?? item.rejected_quantity ?? 0) > 0 || text(item.discrepancyNote ?? item.discrepancy_note).trim().length > 0);
+          return <article key={id} className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3 text-xs ${hasDiscrepancy ? "border-rose-300 bg-rose-50/70" : "border-slate-100"}`}>
+            <div className="min-w-0">
+              <strong>{text(transfer.transferNumber ?? transfer.transfer_number, "حواله")}</strong>
+              <span className="mx-1 text-slate-500">• {gregorianIsoToJalali(text(transfer.transferDate ?? transfer.transfer_date))}</span>
+              {" — "}{sourceName} ← {destinationName}
+              <span className="mx-1 rounded-full bg-slate-100 px-2 py-0.5">{transferStatusLabels[status] ?? status}</span>
+              {hasDiscrepancy && <span className="mx-1 rounded-full bg-rose-100 px-2 py-0.5 font-bold text-rose-800">دارای مغایرت</span>}
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
+                {transferItems.map((item, index) => <span key={text(item.id, String(index))}>{text(item.product_name ?? item.productName)}{text(item.variant_name ?? item.variantName) ? " • " + text(item.variant_name ?? item.variantName) : ""}{": "}{formatQty(text(item.quantitySent ?? item.quantity_sent ?? item.quantity))}</span>)}
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                <button className="rounded-lg border px-2 py-1" type="button" onClick={() => printTransfer(transfer)}>چاپ حواله</button>
-                {status === "DRAFT" && <button disabled={transferPendingAction === "transfer:" + id + ":submit"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "submit")}>تأیید حواله</button>}
-                {status === "SUBMITTED" && <button disabled={transferPendingAction === "transfer:" + id + ":dispatch"} className="rounded-lg bg-indigo-600 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => void transferAction(id, "dispatch")}>ارسال از مبدأ</button>}
-                {["IN_TRANSIT", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":receive"} className="rounded-lg bg-emerald-700 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => openReceive(transfer)}>ثبت تحویل مقصد</button>}
-                {["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":complete"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "complete")}>تکمیل حواله</button>}
-              </div>
+              <div className="mt-1 text-[10px] text-slate-500">مسئول مبدأ: {text(transfer.sourceResponsibleName ?? transfer.source_responsible_name, "—")} · مسئول مقصد: {text(transfer.destinationResponsibleName ?? transfer.destination_responsible_name, "—")}</div>
             </div>
-          );
+            <div className="flex flex-wrap gap-1.5">
+              <button className="rounded-lg border px-2 py-1" type="button" onClick={() => setViewedTransfer(transfer)}>جزئیات</button>
+              <button className="rounded-lg border px-2 py-1" type="button" onClick={() => printTransfer(transfer)}>چاپ حواله</button>
+              {status === "DRAFT" && <button disabled={transferPendingAction === "transfer:" + id + ":submit"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "submit")}>تأیید حواله</button>}
+              {status === "SUBMITTED" && <button disabled={transferPendingAction === "transfer:" + id + ":dispatch"} className="rounded-lg bg-indigo-600 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => void transferAction(id, "dispatch")}>ارسال از مبدأ</button>}
+              {["IN_TRANSIT", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":receive"} className="rounded-lg bg-emerald-700 px-2 py-1 text-white disabled:opacity-50" type="button" onClick={() => openReceive(transfer)}>پذیرش مقصد</button>}
+              {["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY_REPORTED"].includes(status) && <button disabled={transferPendingAction === "transfer:" + id + ":complete"} className="rounded-lg border px-2 py-1 disabled:opacity-50" type="button" onClick={() => void transferAction(id, "complete")}>تکمیل حواله</button>}
+            </div>
+          </article>;
         })}{!shownTransfers.length && <div className="text-xs text-slate-500">حواله‌ای مطابق جستجو پیدا نشد.</div>}</div>
-        {selectedTransfer && <form onSubmit={receiveTransfer} className="space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
-          <div className="flex items-center justify-between"><strong className="text-xs">تحویل حواله {text(selectedTransfer.transferNumber ?? selectedTransfer.transfer_number)}</strong><button type="button" className="text-xs underline" onClick={() => setSelectedTransfer(null)}>بستن</button></div>
+        {selectedTransfer && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-3" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedTransfer(null); }}><form role="dialog" aria-modal="true" aria-labelledby="transfer-receive-title" onSubmit={receiveTransfer} className="max-h-[92vh] w-full max-w-6xl space-y-3 overflow-y-auto rounded-2xl border border-emerald-200 bg-white p-4 shadow-2xl">
+          <div className="flex items-center justify-between"><strong id="transfer-receive-title" className="text-xs">پذیرش مقصد حواله {text(selectedTransfer.transferNumber ?? selectedTransfer.transfer_number)}</strong><button type="button" className="text-xs underline" onClick={() => setSelectedTransfer(null)}>بستن</button></div>
           <label className="block max-w-xs text-[11px]">تاریخ تحویل مقصد شمسی<JalaliDatePicker className="mt-1" value={receiveDate} onChange={setReceiveDate}/></label>
-          <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-right text-[11px]"><thead><tr><th className="p-2">کالا</th><th className="p-2">پذیرفته</th><th className="p-2">کسری</th><th className="p-2">آسیب</th><th className="p-2">رد کیفیت</th><th className="p-2">شرح اختلاف</th><th className="p-2">لینک مدرک</th></tr></thead><tbody>{receiveLines.map((line, index) => { const transferItem = rows(selectedTransfer.items).find((item) => text(item.id) === line.transfer_item_id); return <tr key={line.transfer_item_id}><td className="p-2">{text(transferItem?.product_name)}{text(transferItem?.variant_name) ? ` • ${text(transferItem?.variant_name)}` : ""}</td>{(["accepted_quantity", "missing_qty", "damaged_qty", "rejected_quantity"] as const).map((key) => <td key={key} className="p-1"><input className="w-24 rounded-lg border px-2 py-1 text-left" dir="ltr" inputMode="decimal" value={line[key]} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, [key]: event.target.value } : item))}/></td>)}<td className="p-1"><input className="w-36 rounded-lg border px-2 py-1" value={line.discrepancy_description} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, discrepancy_description: event.target.value } : item))}/></td><td className="p-1"><input className="w-48 rounded-lg border px-2 py-1 text-left" dir="ltr" type="url" aria-label="لینک مدرک مغایرت" placeholder="https://..." value={line.evidence_url} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, evidence_url: event.target.value } : item))}/></td></tr>; })}</tbody></table></div>
-          <button className={button}>ثبت مقادیر تحویل و اختلاف</button>
-        </form>}
+          <div className="overflow-x-auto"><table className="w-full min-w-[1120px] text-right text-[11px]"><thead><tr><th className="p-2">کالا</th><th className="p-2">تعداد سند مبدأ</th><th className="p-2">پذیرفته سالم</th><th className="p-2">شمارش مقصد</th><th className="p-2">اختلاف</th><th className="p-2">کسری</th><th className="p-2">آسیب</th><th className="p-2">رد کیفیت</th><th className="p-2">شرح اختلاف</th><th className="p-2">لینک مدرک</th></tr></thead><tbody>{receiveLines.map((line, index) => { const transferItem = rows(selectedTransfer.items).find((item) => text(item.id) === line.transfer_item_id); const sent = Number(transferItem?.quantitySent ?? transferItem?.quantity_sent ?? transferItem?.quantity ?? 0); const destinationCount = Number(line.accepted_quantity || 0) + Number(line.damaged_qty || 0) + Number(line.rejected_quantity || 0); const difference = sent - destinationCount; return <tr key={line.transfer_item_id}><td className="p-2">{text(transferItem?.product_name)}{text(transferItem?.variant_name) ? ` • ${text(transferItem?.variant_name)}` : ""}</td><td className="p-2 tabular-nums">{formatQty(sent)}</td><td className="p-1"><input className="w-24 rounded-lg border px-2 py-1 text-left" dir="ltr" inputMode="decimal" aria-label="تعداد سالم پذیرفته‌شده" value={line.accepted_quantity} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, accepted_quantity: event.target.value } : item))}/></td><td className="p-2 tabular-nums">{formatQty(destinationCount)}</td><td className={`p-2 tabular-nums font-bold ${difference ? "text-rose-700" : "text-emerald-700"}`}>{difference > 0 ? "−" : difference < 0 ? "+" : ""}{formatQty(Math.abs(difference))}</td>{(["missing_qty", "damaged_qty", "rejected_quantity"] as const).map((key) => <td key={key} className="p-1"><input className="w-24 rounded-lg border px-2 py-1 text-left" dir="ltr" inputMode="decimal" aria-label={key === "missing_qty" ? "کسری" : key === "damaged_qty" ? "آسیب‌دیده" : "رد کیفیت"} value={line[key]} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, [key]: event.target.value } : item))}/></td>)}<td className="p-1"><input className="w-36 rounded-lg border px-2 py-1" aria-label="توضیح اختلاف همین کالا" value={line.discrepancy_description} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, discrepancy_description: event.target.value } : item))}/></td><td className="p-1"><input className="w-48 rounded-lg border px-2 py-1 text-left" dir="ltr" type="url" aria-label="لینک مدرک مغایرت" placeholder="https://..." value={line.evidence_url} onChange={(event) => setReceiveLines((items) => items.map((item, i) => i === index ? { ...item, evidence_url: event.target.value } : item))}/></td></tr>; })}</tbody></table></div>
+          <label className="block text-[11px]">توضیح نهایی پذیرش مقصد<textarea rows={3} maxLength={2000} className={`${field} mt-1`} value={receiveNotes} onChange={(event) => setReceiveNotes(event.target.value)} placeholder="جمع‌بندی دریافت، وضعیت بسته‌بندی یا توضیح کلی مقصد"/></label>
+          <div className="flex justify-end gap-2"><button type="button" className="rounded-xl border px-4 py-2 text-xs" onClick={() => setSelectedTransfer(null)}>انصراف</button><button disabled={transferPendingAction === "transfer:" + text(selectedTransfer.id) + ":receive"} className={button}>{transferPendingAction === "transfer:" + text(selectedTransfer.id) + ":receive" ? "در حال ثبت…" : "ثبت پذیرش و اختلاف"}</button></div>
+        </form></div>}
+        {viewedTransfer && <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/55 p-3" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setViewedTransfer(null); }}><section role="dialog" aria-modal="true" aria-labelledby="transfer-detail-title" className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
+          <header className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="transfer-detail-title" className="text-base font-extrabold">جزئیات حواله {text(viewedTransfer.transferNumber ?? viewedTransfer.transfer_number, "—")}</h3><p className="mt-1 text-xs text-slate-500">{text(viewedTransfer.source_warehouse_name, "انبار مبدأ")} ← {text(viewedTransfer.destination_warehouse_name, "انبار مقصد")} • {gregorianIsoToJalali(text(viewedTransfer.transferDate ?? viewedTransfer.transfer_date))}</p></div><button type="button" className="rounded-lg border px-3 py-1 text-lg" aria-label="بستن جزئیات" onClick={() => setViewedTransfer(null)}>×</button></header>
+          <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[760px] text-right text-xs"><thead className="border-b bg-slate-50"><tr><th className="p-2">کالا</th><th className="p-2">ارسالی</th><th className="p-2">پذیرفته</th><th className="p-2">کسری</th><th className="p-2">آسیب</th><th className="p-2">ردشده</th><th className="p-2">شرح اختلاف</th></tr></thead><tbody>{rows(viewedTransfer.items).map((item, index) => { const sent = Number(item.quantitySent ?? item.quantity_sent ?? item.quantity ?? 0); const accepted = Number(item.quantityAccepted ?? item.quantity_accepted ?? item.accepted_quantity ?? 0); const missing = Number(item.quantityMissing ?? item.quantity_missing ?? item.missing_qty ?? 0); const damaged = Number(item.quantityDamaged ?? item.quantity_damaged ?? item.damaged_qty ?? 0); const rejected = Number(item.quantityRejected ?? item.quantity_rejected ?? item.rejected_quantity ?? 0); const diff = sent - accepted - missing - damaged - rejected; return <tr key={text(item.id, String(index))} className="border-b border-slate-100"><td className="p-2">{text(item.product_name ?? item.productName)}{text(item.variant_name ?? item.variantName) ? " • " + text(item.variant_name ?? item.variantName) : ""}</td><td className="p-2">{formatQty(sent)}</td><td className="p-2">{formatQty(accepted)}</td><td className="p-2">{formatQty(missing)}</td><td className="p-2">{formatQty(damaged)}</td><td className="p-2">{formatQty(rejected)}</td><td className={`p-2 ${diff !== 0 ? "font-semibold text-rose-700" : "text-slate-500"}`}>{text(item.discrepancyNote ?? item.discrepancy_note, diff ? `اختلاف ${formatQty(diff)}` : "—")}</td></tr>; })}</tbody></table></div>
+          <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2"><p>مسئول مبدأ: {text(viewedTransfer.sourceResponsibleName ?? viewedTransfer.source_responsible_name, "—")}</p><p>مسئول مقصد: {text(viewedTransfer.destinationResponsibleName ?? viewedTransfer.destination_responsible_name, "—")}</p><p className="sm:col-span-2">یادداشت نهایی: {text(viewedTransfer.receiptNotes ?? viewedTransfer.receipt_notes ?? viewedTransfer.notes, "ثبت نشده")}</p></div>
+          <div className="mt-4 flex justify-end gap-2"><button type="button" className="rounded-xl border px-4 py-2 text-xs" onClick={() => printTransfer(viewedTransfer)}>چاپ جزئیات</button><button type="button" className="rounded-xl bg-slate-900 px-4 py-2 text-xs text-white" onClick={() => setViewedTransfer(null)}>بستن</button></div>
+        </section></div>}
       </div>}
+    {supplierCreateOpen && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !supplierCreating) setSupplierCreateOpen(false); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="inventory-supplier-create-title" className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl">
+        <header className="mb-4 flex items-center justify-between gap-3"><h3 id="inventory-supplier-create-title" className="text-base font-extrabold">ثبت تأمین‌کننده برای رسید خرید</h3><button type="button" disabled={supplierCreating} className="rounded-lg border px-3 py-1 text-lg disabled:opacity-50" aria-label="بستن" onClick={() => setSupplierCreateOpen(false)}>×</button></header>
+        <form onSubmit={createInventorySupplier} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="text-xs sm:col-span-2">نام شخص / شرکت *<input autoFocus required minLength={2} maxLength={140} className={`${field} mt-1`} value={supplierDraft.display_name} onChange={(event) => setSupplierDraft({ ...supplierDraft, display_name: event.target.value })}/></label>
+          <label className="text-xs">نام شرکت<input maxLength={140} className={`${field} mt-1`} value={supplierDraft.company_name} onChange={(event) => setSupplierDraft({ ...supplierDraft, company_name: event.target.value })}/></label>
+          <label className="text-xs">موبایل<input inputMode="tel" className={`${field} mt-1`} value={supplierDraft.mobile} onChange={(event) => setSupplierDraft({ ...supplierDraft, mobile: event.target.value })}/></label>
+          <label className="text-xs">تلفن ثابت<input inputMode="tel" className={`${field} mt-1`} value={supplierDraft.phone} onChange={(event) => setSupplierDraft({ ...supplierDraft, phone: event.target.value })}/></label>
+          <label className="text-xs">کد اقتصادی<input className={`${field} mt-1`} value={supplierDraft.economic_code} onChange={(event) => setSupplierDraft({ ...supplierDraft, economic_code: event.target.value })}/></label>
+          <div className="flex justify-end gap-2 sm:col-span-2"><button type="button" disabled={supplierCreating} className="rounded-xl border px-4 py-2 text-xs disabled:opacity-50" onClick={() => setSupplierCreateOpen(false)}>انصراف</button><button disabled={supplierCreating || supplierDraft.display_name.trim().length < 2} className={button}>{supplierCreating ? "در حال ثبت…" : "ثبت و انتخاب تأمین‌کننده"}</button></div>
+        </form>
+      </section>
+    </div>}
     </section>
   );
 }
